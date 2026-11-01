@@ -8,7 +8,7 @@
  *
  * Route registration order matters — exact paths must come before the
  * /:sha256[.ext] blob catch-all:
- *   /report, /upload, /mirror, /media  →  DELETE /:sha256  →  /list/:pubkey  →  /:sha256[.ext]
+ *   /report, /upload, /mirror, /media  →  DELETE /:sha256  →  /list/:pubkey, /pin/:sha256  →  /:sha256[.ext]
  */
 
 import { Hono } from "@hono/hono";
@@ -24,6 +24,7 @@ import { buildMirrorRouter } from "./mirror.ts";
 import { buildMediaRouter } from "./media.ts";
 import { buildDeleteRouter } from "./delete.ts";
 import { buildListRouter } from "./list.ts";
+import { buildPinRouter } from "./pin.ts";
 import { buildReportRouter } from "./report.ts";
 
 export function buildBlossomRouter(
@@ -72,6 +73,9 @@ export function buildBlossomRouter(
   // BUD-02: GET /list/:pubkey — mounted before blob catch-all so /list/:pubkey
   // is not caught by GET /:sha256.
   app.route("/", buildListRouter(db, config));
+
+  // Draft BUD blob pinning: PUT /pin/:sha256, GET /pin/:sha256
+  app.route("/", buildPinRouter(db, config));
 
   // BUD-01: GET/HEAD /:sha256[.ext] — blob catch-all, must be last.
   app.route("/", buildBlobsRouter(db, storage, config));

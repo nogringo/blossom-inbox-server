@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Minor Changes
+
+- Implement the draft blob pinning BUD. `p` tags in the `upload` token of `PUT /upload`, `HEAD /upload`, and `PUT /mirror` pin the blob for those pubkeys
+  instead of the signer, `PUT /pin/<sha256>` pins an already stored blob, `GET /pin/<sha256>` returns the signer's own pin, and `DELETE /<sha256>` removes it.
+- Check storage rules and `upload.requirePubkeyInRule` against the `p` pubkeys when a token names some, and refuse a `p` pubkey the rules do not accept with
+  `403 Forbidden`. A server with `requirePubkeyInRule` enabled now accepts blobs pinned for its listed pubkeys from any signer, including one-time keys.
+- Record when each owner pinned a blob. Owners recorded before this release report the blob's upload time as their pin date.
+
+### Patch Changes
+
+- Refresh a blob's last-access time when a deduplicated upload, mirror, or media request pins it, instead of resetting it to the original upload time.
+
 ## 6.4.1 - 2026-10-06
 
 ### Patch Changes

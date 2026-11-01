@@ -11,7 +11,7 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { HTTPException } from "@hono/hono/http-exception";
 import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import type { NostrEvent } from "nostr-tools";
-import { extractHostname, parseAuthEvent, requireAuth, requireXTag } from "../../src/middleware/auth.ts";
+import { extractHostname, getPinTargets, parseAuthEvent, requireAuth, requireXTag } from "../../src/middleware/auth.ts";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -403,6 +403,39 @@ Deno.test("requireXTag: x tags present, empty hash → throws 403", () => {
     () => requireXTag(event, ""),
     HTTPException,
   );
+});
+
+// ---------------------------------------------------------------------------
+// getPinTargets
+// ---------------------------------------------------------------------------
+
+const PIN_PUBKEY = "c".repeat(64);
+const OTHER_PIN_PUBKEY = "d".repeat(64);
+
+function makePinEvent(...pTags: string[][]): NostrEvent {
+  return makeEvent({
+    tags: [
+      ["t", "upload"],
+      ["expiration", String(Math.floor(Date.now() / 1000) + 600)],
+      ...pTags,
+    ],
+  });
+}
+
+Deno.test("getPinTargets: no p tags → empty, the blob is pinned for the signer", () => {
+  assertEquals(getPinTargets(makePinEvent()), []);
+});
+
+Deno.test("getPinTargets: returns each p pubkey once, in tag order", () => {
+  const event = makePinEvent(["p", OTHER_PIN_PUBKEY], ["p", PIN_PUBKEY], ["p", OTHER_PIN_PUBKEY]);
+  assertEquals(getPinTargets(event), [OTHER_PIN_PUBKEY, PIN_PUBKEY]);
+});
+
+Deno.test("getPinTargets: malformed p tag values throw 400", () => {
+  for (const tag of [["p", "npub1notahexkey"], ["p", PIN_PUBKEY.toUpperCase()], ["p", PIN_PUBKEY.slice(1)], ["p"]]) {
+    const error = assertThrows(() => getPinTargets(makePinEvent(tag)), HTTPException);
+    assertEquals(error.status, 400);
+  }
 });
 
 // ---------------------------------------------------------------------------

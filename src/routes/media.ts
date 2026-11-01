@@ -14,7 +14,7 @@ import {
   insertBlobRecord,
   insertMediaDerivative,
   insertMediaThumbnail,
-  isOwner,
+  pinBlob,
 } from "../db/blobs.ts";
 import { requireAuth } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
@@ -504,10 +504,8 @@ export function buildMediaRouter(
         if (existing) {
           await Deno.remove(tmpPath).catch(() => {});
           tmpPath = null;
-          if (
-            auth && !(await isOwner(db, existingOptimizedHash, auth.pubkey))
-          ) {
-            await insertBlob(db, existing, auth.pubkey);
+          if (auth) {
+            await pinBlob(db, existingOptimizedHash, [auth.pubkey], Math.floor(Date.now() / 1000));
           }
           const baseUrl = getBaseUrl(ctx.req.raw, config.publicDomain);
           const url = getBlobUrl(existing.sha256, existing.type, baseUrl);
@@ -598,8 +596,8 @@ export function buildMediaRouter(
         if (existing) {
           // Record the original→optimized mapping even on dedup
           await insertMediaDerivative(db, originalHash, optimizedHash);
-          if (auth && !(await isOwner(db, optimizedHash, auth.pubkey))) {
-            await insertBlob(db, existing, auth.pubkey);
+          if (auth) {
+            await pinBlob(db, optimizedHash, [auth.pubkey], Math.floor(Date.now() / 1000));
           }
           const baseUrl = getBaseUrl(ctx.req.raw, config.publicDomain);
           let thumbnailTag = await getThumbnailTag(
@@ -685,7 +683,7 @@ export function buildMediaRouter(
         uploaded: now,
         nip94: optionalNip94Tags({ dim, originalSha256: originalHash }),
       };
-      await insertBlob(db, blobRecord, auth?.pubkey ?? "anonymous");
+      await insertBlob(db, blobRecord, [auth?.pubkey ?? "anonymous"]);
       await insertMediaDerivative(db, originalHash, optimizedHash);
 
       const baseUrl = getBaseUrl(ctx.req.raw, config.publicDomain);

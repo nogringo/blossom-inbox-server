@@ -34,7 +34,7 @@ export type DbRequest =
   | {
     reqId: number;
     op: "insertBlob";
-    args: [blob: BlobRecord, uploaderPubkey: string];
+    args: [blob: BlobRecord, pubkeys: string[]];
   }
   | { reqId: number; op: "isOwner"; args: [sha256: string, pubkey: string] }
   | { reqId: number; op: "getStats"; args: [] }

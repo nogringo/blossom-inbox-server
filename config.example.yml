@@ -117,7 +117,7 @@ storage:
 # ---------------------------------------------------------------------------
 
 upload:
-  # Enable the PUT /upload endpoint. Set to false for a read-only server.
+  # Enable the PUT /upload and PUT /pin endpoints. Set to false for a read-only server.
   enabled: true
 
   # Require a valid BUD-11 Nostr auth event for uploads.
@@ -146,6 +146,8 @@ upload:
   # When true, uploads are rejected unless the uploader's Nostr pubkey appears
   # in at least one storage rule's "pubkeys" list.
   # Enables closed/invite-only servers. Only meaningful with pubkey-scoped rules.
+  # When the auth token has p tags, each p pubkey must appear instead of the
+  # uploader, so anyone can send blobs to the listed pubkeys.
   requirePubkeyInRule: false
 
 # ---------------------------------------------------------------------------

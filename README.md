@@ -13,6 +13,7 @@ hash. Built with [Deno 2](https://deno.com), [Hono](https://hono.dev), and [LibS
 - **BUD-08** — `nip94` field in all blob descriptor responses
 - **BUD-09** — Blob reports (`PUT /report`) accepting NIP-56 kind:1984 events
 - **BUD-11** — Nostr-signed event authentication (kind 24242)
+- **Blob pinning** (draft BUD): pin blobs for yourself or for other pubkeys with `p` tags, `PUT /pin/:sha256`, and `GET /pin/:sha256`
 - Zero-copy streaming uploads — no body buffering, SHA-256 computed in a dedicated worker pool
 - Content-addressed deduplication — re-uploading an existing hash skips the write
 - Configurable storage retention rules with MIME-type glob patterns and per-pubkey scoping
@@ -177,11 +178,11 @@ Compose example and NixOS module enable this safeguard automatically; direct sou
 | `storage.backend`            | `local`          | Storage backend: `local` or `s3`                                                                                       |
 | `storage.local.dir`          | `./data/blobs`   | Directory for blob files (local backend)                                                                               |
 | `storage.removeWhenNoOwners` | `false`          | Delete blobs with no owners on each prune cycle, regardless of expiry rules                                            |
-| `upload.enabled`             | `true`           | Enable `PUT /upload`                                                                                                   |
+| `upload.enabled`             | `true`           | Enable `PUT /upload` and `PUT /pin`                                                                                    |
 | `upload.requireAuth`         | `true`           | Require Nostr auth for uploads                                                                                         |
 | `upload.maxSize`             | `2147483648`     | Maximum upload size in bytes (2 GB)                                                                                    |
 | `upload.workers`             | `0`              | Upload worker threads (0 = one per CPU core)                                                                           |
-| `upload.requirePubkeyInRule` | `false`          | Reject uploads unless the uploader's pubkey appears in a storage rule                                                  |
+| `upload.requirePubkeyInRule` | `false`          | Reject uploads unless the uploader's pubkey, or each `p` pubkey the token pins for, appears in a storage rule          |
 | `mirror.enabled`             | `true`           | Enable `PUT /mirror` (BUD-04)                                                                                          |
 | `mirror.connectTimeout`      | `30000`          | Timeout (ms) to connect to the origin; 0 = no limit                                                                    |
 | `mirror.bodyTimeout`         | `0`              | Timeout (ms) for full body transfer from origin; 0 = no limit                                                          |
@@ -260,12 +261,13 @@ Authorization: Nostr <base64-encoded-JSON-event>
 
 The event must be **kind 24242** and include:
 
-| Tag          | Required | Description                                                    |
-| ------------ | -------- | -------------------------------------------------------------- |
-| `t`          | Yes      | Verb for this token: `upload`, `delete`, `get`, or `list`      |
-| `expiration` | Yes      | Unix timestamp after which the token is invalid                |
-| `x`          | No       | One or more SHA-256 hashes scoping the token to specific blobs |
-| `server`     | No       | Hostname(s) this token is valid for                            |
+| Tag          | Required | Description                                                               |
+| ------------ | -------- | ------------------------------------------------------------------------- |
+| `t`          | Yes      | Verb for this token: `upload`, `delete`, `get`, `list`, `media`, or `pin` |
+| `expiration` | Yes      | Unix timestamp after which the token is invalid                           |
+| `x`          | No       | One or more SHA-256 hashes scoping the token to specific blobs            |
+| `server`     | No       | Hostname(s) this token is valid for                                       |
+| `p`          | No       | On `upload` and `pin` tokens, pubkey(s) to pin the blob for               |
 
 Example event (before signing):
 
@@ -292,7 +294,7 @@ Example event (before signing):
 | `HEAD`   | `/:sha256[.ext]` | Optional   | Same as GET without the body.                                                                                                                         |
 | `PUT`    | `/upload`        | Required\* | Upload a blob. `Content-Length` is required. Returns a `BlobDescriptor`.                                                                              |
 | `HEAD`   | `/upload`        | Required\* | Preflight check (BUD-06). Send `X-Content-Length`, `X-Content-Type`, `X-SHA-256` to verify the server will accept the upload before sending the body. |
-| `DELETE` | `/:sha256`       | Required\* | Delete a blob. The file is removed when the last owner deletes it.                                                                                    |
+| `DELETE` | `/:sha256`       | Required\* | Remove the signer's pin on a blob. The file is removed once no pubkey pins it.                                                                        |
 | `GET`    | `/list/:pubkey`  | Optional\* | List blobs uploaded by a pubkey. Disabled by default (`list.enabled: false`).                                                                         |
 
 ### Mirror Endpoint (BUD-04)
@@ -307,6 +309,18 @@ Example event (before signing):
 | ------ | -------- | ---------- | ------------------------------------------------------------------------------------------------------- |
 | `PUT`  | `/media` | Required\* | Upload an image or video; the server optimises/transcodes it and returns the optimised blob descriptor. |
 | `HEAD` | `/media` | Required\* | Preflight check for the media endpoint.                                                                 |
+
+### Pin Endpoints (draft blob pinning BUD)
+
+| Method | Path           | Auth     | Description                                                                                                            |
+| ------ | -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
+| `PUT`  | `/pin/:sha256` | Required | Pin a stored blob for the signer, or for each `p` pubkey. Returns its `BlobDescriptor`. Existing pins keep their date. |
+| `GET`  | `/pin/:sha256` | Required | Return the signer's own pin as `{ "sha256": "...", "pinned": <unix timestamp> }`, or 404 if it does not pin the blob.  |
+
+Both take a `pin` token with an `x` tag matching the hash. An `upload` token on `PUT /upload`, `HEAD /upload`, or `PUT /mirror` may carry `p` tags too. The blob
+is then pinned for each `p` pubkey and not for the signer, which can be a one-time key. Storage rules and `upload.requirePubkeyInRule` are checked against the
+`p` pubkeys instead of the signer, and a `p` pubkey they refuse gets `403 Forbidden`. A server with `requirePubkeyInRule: true` therefore accepts blobs that
+anyone sends to its listed pubkeys.
 
 ### Report Endpoint (BUD-09)
 

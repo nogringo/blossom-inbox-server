@@ -3,10 +3,10 @@
  *
  * Pipeline (main thread unless noted):
  *   1.  config.mirror.enabled check → 403
- *   2.  BUD-11 auth check (t="upload") → 401/403
+ *   2.  BUD-11 auth check (t="upload") → 401/403, malformed p tags → 400
  *   3.  Parse JSON body { url } → 400
  *   4.  Validate URL scheme (http/https only) → 400
- *   5.  Pre-fetch pubkey allowlist and worker-capacity checks
+ *   5.  Pre-fetch pubkey allowlist (403 for a refused p pubkey) and worker-capacity checks
  *   6.  SSRF guard per fetch hop: literal-IP check (full IPv4/IPv6 incl.
  *       IPv4-mapped/NAT64/6to4/ULA/link-local) + resolve-then-validate of
  *       A/AAAA records; redirects followed manually (≤ 3 hops, re-validated
@@ -21,7 +21,7 @@
  *  13.  BUD-11 x-tag verification (post-hash, strict):
  *         - Auth present + 0 x tags → 403 (x tag is REQUIRED for PUT /mirror)
  *         - Auth present + x tags present but none matches hash → 403
- *  14.  Dedup guard: if blob already exists, skip rename, add owner, return descriptor
+ *  14.  Dedup guard: if blob already exists, skip rename, pin it, return descriptor
  *  15.  Atomic Deno.rename(tmpPath → <storageDir>/<hash>[.<ext>])
  *  16.  insertBlob() — metadata write
  *  17.  Return BlobDescriptor JSON 200
@@ -38,8 +38,8 @@ import { HTTPException } from "@hono/hono/http-exception";
 import type { Client } from "@libsql/client";
 import { lookup } from "node:dns/promises";
 import { ulid } from "@std/ulid";
-import { getBlob, insertBlob, isOwner } from "../db/blobs.ts";
-import { requireAuth } from "../middleware/auth.ts";
+import { getBlob, insertBlob, pinBlob } from "../db/blobs.ts";
+import { getPinTargets, requireAuth } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { debug } from "../middleware/debug.ts";
 import { errorResponse } from "../middleware/errors.ts";
@@ -50,7 +50,7 @@ import type { Config } from "../config/schema.ts";
 import { mimeToExt } from "../utils/mime.ts";
 import { type Nip94Tag, nip94Tags, optionalNip94Tags } from "../utils/nip94.ts";
 import { getBaseUrl, getBlobUrl } from "../utils/url.ts";
-import { getFileRule, pubkeyAllowedByRules } from "../prune/rules.ts";
+import { acceptsMimeType, findRefusedPubkey, getFileRule, pubkeyAllowedByRules } from "../prune/rules.ts";
 import { extractDimensions } from "../optimize/dimensions.ts";
 import { checkLiteralHost, parseIPv4, parseIPv6, validateResolvedRecords } from "../utils/ip-guard.ts";
 
@@ -241,6 +241,20 @@ export function buildMirrorRouter(
       auth = ctx.get("auth");
     }
 
+    let pinTargets: string[] = [];
+    if (auth) {
+      try {
+        pinTargets = getPinTargets(auth);
+      } catch (err) {
+        if (err instanceof HTTPException) {
+          debug(debugPrefix, `rejected: ${err.message}`);
+          return errorResponse(ctx, 400, err.message);
+        }
+        throw err;
+      }
+    }
+    const pinners = pinTargets.length > 0 ? pinTargets : [auth?.pubkey ?? "anonymous"];
+
     let mirrorUrl: URL;
     try {
       const body = (await ctx.req.json()) as { url?: unknown };
@@ -283,7 +297,7 @@ export function buildMirrorRouter(
     // uploader must be rejected BEFORE the origin fetch — otherwise they can
     // make the server issue outbound requests it would never store for them.
     if (
-      config.upload.requirePubkeyInRule &&
+      config.upload.requirePubkeyInRule && pinTargets.length === 0 &&
       !pubkeyAllowedByRules(auth?.pubkey, config.storage.rules, true)
     ) {
       debug(
@@ -295,6 +309,14 @@ export function buildMirrorRouter(
         401,
         "Pubkey not authorized by any storage rule",
       );
+    }
+    const refusedTarget = pinTargets.find((pubkey) => !pubkeyAllowedByRules(pubkey, config.storage.rules, config.upload.requirePubkeyInRule));
+    if (refusedTarget) {
+      debug(
+        debugPrefix,
+        `rejected: pin pubkey ${refusedTarget.slice(0, 8)} not authorized by any storage rule (pre-fetch)`,
+      );
+      return errorResponse(ctx, 403, `Server refuses to pin blobs for ${refusedTarget}`);
     }
 
     if (getPool().available === 0) {
@@ -379,7 +401,7 @@ export function buildMirrorRouter(
       config.storage.rules,
       config.upload.requirePubkeyInRule,
     );
-    if (!mimeRule) {
+    if (!mimeRule && pinTargets.length === 0) {
       await originResponse.body?.cancel();
       debug(
         debugPrefix,
@@ -397,6 +419,24 @@ export function buildMirrorRouter(
         415,
         `Server does not accept ${mimeType} blobs`,
       );
+    }
+
+    const refusedPubkey = findRefusedPubkey(
+      mimeType,
+      pinTargets,
+      config.storage.rules,
+      config.upload.requirePubkeyInRule,
+    );
+    if (refusedPubkey) {
+      await originResponse.body?.cancel();
+      debug(
+        debugPrefix,
+        `rejected: no storage rule matches pin pubkey ${refusedPubkey.slice(0, 8)}, mime=${mimeType}`,
+      );
+      if (!acceptsMimeType(mimeType, config.storage.rules)) {
+        return errorResponse(ctx, 415, `Server does not accept ${mimeType} blobs`);
+      }
+      return errorResponse(ctx, 403, `Server refuses to pin blobs for ${refusedPubkey}`);
     }
 
     const body = originResponse.body;
@@ -550,8 +590,8 @@ export function buildMirrorRouter(
         debugPrefix,
         `dedup hit — returning existing blob ${hash.slice(0, 8)}`,
       );
-      if (auth && !(await isOwner(db, hash, auth.pubkey))) {
-        await insertBlob(db, existing, auth.pubkey);
+      if (auth) {
+        await pinBlob(db, hash, pinners, Math.floor(Date.now() / 1000));
       }
       const baseUrl = getBaseUrl(ctx.req.raw, config.publicDomain);
       const url = getBlobUrl(existing.sha256, existing.type, baseUrl);
@@ -599,7 +639,7 @@ export function buildMirrorRouter(
     };
     debug(debugPrefix, `insertBlob start hash=${hash}`);
     const t4 = Date.now();
-    await insertBlob(db, blobRecord, auth?.pubkey ?? "anonymous");
+    await insertBlob(db, blobRecord, pinners);
     const t5 = Date.now();
     debug(debugPrefix, `insertBlob complete elapsed=${t5 - t4}ms`);
 

@@ -3,12 +3,12 @@
  * BUD-06: HEAD /upload — Preflight check
  *
  * Upload pipeline (main thread responsibilities):
- *   1. BUD-11 auth check
+ *   1. BUD-11 auth check, plus the p tags naming the pubkeys to pin the blob for
  *   2. Content-Length required → 411 if absent
  *   3. Content-Length > maxSize → 413 (body never read)
- *   4. MIME type allowlist check → 415
+ *   4. MIME type allowlist check → 415, refused pin pubkey → 403
  *   5. X-SHA-256 format + auth x-tag validation
- *   6. Dedup check (hasBlob) → fast return if already stored
+ *   6. Dedup check (hasBlob) → pin and fast return if already stored
  *   7. Pool worker available? → 503 if pool full (body never read)
  *   8. Generate tmpPath, dispatch stream to worker (zero-copy transfer)
  *   9. Await { hash, size } from worker
@@ -28,8 +28,8 @@ import { Hono } from "@hono/hono";
 import { HTTPException } from "@hono/hono/http-exception";
 import type { Client } from "@libsql/client";
 import { ulid } from "@std/ulid";
-import { getBlob, hasBlob, insertBlob, isOwner } from "../db/blobs.ts";
-import { requireAuth, requireXTag } from "../middleware/auth.ts";
+import { getBlob, hasBlob, insertBlob, pinBlob } from "../db/blobs.ts";
+import { getPinTargets, requireAuth, requireXTag } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { debug } from "../middleware/debug.ts";
 import { errorResponse } from "../middleware/errors.ts";
@@ -40,7 +40,7 @@ import { mimeToExt } from "../utils/mime.ts";
 import { type Nip94Tag, nip94Tags, optionalNip94Tags } from "../utils/nip94.ts";
 import { byteCapGuard, drainBody } from "../utils/streams.ts";
 import { getBaseUrl, getBlobUrl } from "../utils/url.ts";
-import { getFileRule } from "../prune/rules.ts";
+import { acceptsMimeType, findRefusedPubkey, getFileRule } from "../prune/rules.ts";
 import { extractDimensions } from "../optimize/dimensions.ts";
 
 /** BUD-02 Blob Descriptor */
@@ -70,12 +70,14 @@ export function buildUploadRouter(
     }
 
     let auth: ReturnType<typeof requireAuth> | undefined;
+    let pinTargets: string[] = [];
     if (config.upload.requireAuth) {
       try {
         auth = requireAuth(ctx, "upload");
+        pinTargets = getPinTargets(auth);
       } catch (err) {
         if (err instanceof HTTPException) {
-          return errorResponse(ctx, err.status as 401 | 403, err.message);
+          return errorResponse(ctx, err.status as 400 | 401 | 403, err.message);
         }
         throw err;
       }
@@ -125,7 +127,7 @@ export function buildUploadRouter(
       config.storage.rules,
       config.upload.requirePubkeyInRule,
     );
-    if (!rule) {
+    if (!rule && pinTargets.length === 0) {
       if (config.upload.requirePubkeyInRule) {
         return errorResponse(
           ctx,
@@ -138,6 +140,19 @@ export function buildUploadRouter(
         415,
         `Server does not accept ${xContentType} blobs`,
       );
+    }
+
+    const refusedPubkey = findRefusedPubkey(
+      xContentType,
+      pinTargets,
+      config.storage.rules,
+      config.upload.requirePubkeyInRule,
+    );
+    if (refusedPubkey) {
+      if (!acceptsMimeType(xContentType, config.storage.rules)) {
+        return errorResponse(ctx, 415, `Server does not accept ${xContentType} blobs`);
+      }
+      return errorResponse(ctx, 403, `Server refuses to pin blobs for ${refusedPubkey}`);
     }
 
     if (getPool().available === 0) {
@@ -162,18 +177,21 @@ export function buildUploadRouter(
     }
 
     let auth: ReturnType<typeof requireAuth> | undefined;
+    let pinTargets: string[] = [];
     if (config.upload.requireAuth) {
       try {
         auth = requireAuth(ctx, "upload");
+        pinTargets = getPinTargets(auth);
       } catch (err) {
         const msg = err instanceof HTTPException ? err.message : String(err);
         debug(debugPrefix, `rejected: auth failed — ${msg}`);
         if (err instanceof HTTPException) {
-          return errorResponse(ctx, err.status as 401 | 403, err.message);
+          return errorResponse(ctx, err.status as 400 | 401 | 403, err.message);
         }
         throw err;
       }
     }
+    const pinners = pinTargets.length > 0 ? pinTargets : [auth?.pubkey ?? "anonymous"];
 
     debug(
       debugPrefix,
@@ -219,7 +237,7 @@ export function buildUploadRouter(
       config.storage.rules,
       config.upload.requirePubkeyInRule,
     );
-    if (!mimeRule) {
+    if (!mimeRule && pinTargets.length === 0) {
       await ctx.req.raw.body?.cancel();
       debug(
         debugPrefix,
@@ -237,6 +255,24 @@ export function buildUploadRouter(
         415,
         `Server does not accept ${mimeType} blobs`,
       );
+    }
+
+    const refusedPubkey = findRefusedPubkey(
+      mimeType,
+      pinTargets,
+      config.storage.rules,
+      config.upload.requirePubkeyInRule,
+    );
+    if (refusedPubkey) {
+      await ctx.req.raw.body?.cancel();
+      debug(
+        debugPrefix,
+        `rejected: no storage rule matches pin pubkey ${refusedPubkey.slice(0, 8)}, mime=${mimeType}`,
+      );
+      if (!acceptsMimeType(mimeType, config.storage.rules)) {
+        return errorResponse(ctx, 415, `Server does not accept ${mimeType} blobs`);
+      }
+      return errorResponse(ctx, 403, `Server refuses to pin blobs for ${refusedPubkey}`);
     }
 
     const xSha256 = ctx.req.header("x-sha-256")?.toLowerCase() ?? null;
@@ -287,9 +323,8 @@ export function buildUploadRouter(
           debugPrefix,
           `dedup hit — returning existing blob ${xSha256.slice(0, 8)}`,
         );
-        // Register this pubkey as an owner if they aren't already
-        if (auth && !(await isOwner(db, xSha256, auth.pubkey))) {
-          await insertBlob(db, existing, auth.pubkey);
+        if (auth) {
+          await pinBlob(db, existing.sha256, pinners, Math.floor(Date.now() / 1000));
         }
         const baseUrl = getBaseUrl(ctx.req.raw, config.publicDomain);
         const url = getBlobUrl(existing.sha256, existing.type, baseUrl);
@@ -440,7 +475,7 @@ export function buildUploadRouter(
     };
     debug(debugPrefix, `insertBlob start hash=${hash}`);
     const t2 = Date.now();
-    await insertBlob(db, blobRecord, auth?.pubkey ?? "anonymous");
+    await insertBlob(db, blobRecord, pinners);
     const t3 = Date.now();
     debug(debugPrefix, `insertBlob complete elapsed=${t3 - t2}ms`);
 

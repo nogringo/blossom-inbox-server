@@ -57,8 +57,8 @@ export class DbProxy implements IDbHandle {
     return this.call<BlobRecord | null>("getBlob", [sha256]);
   }
 
-  insertBlob(blob: BlobRecord, uploaderPubkey: string): Promise<void> {
-    return this.call<void>("insertBlob", [blob, uploaderPubkey]);
+  insertBlob(blob: BlobRecord, pubkeys: string[]): Promise<void> {
+    return this.call<void>("insertBlob", [blob, pubkeys]);
   }
 
   isOwner(sha256: string, pubkey: string): Promise<boolean> {

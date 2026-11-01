@@ -42,8 +42,8 @@ export class DirectDbHandle implements IDbHandle {
     return getBlob(this.client, sha256);
   }
 
-  insertBlob(blob: BlobRecord, uploaderPubkey: string): Promise<void> {
-    return insertBlob(this.client, blob, uploaderPubkey);
+  insertBlob(blob: BlobRecord, pubkeys: string[]): Promise<void> {
+    return insertBlob(this.client, blob, pubkeys);
   }
 
   isOwner(sha256: string, pubkey: string): Promise<boolean> {

@@ -125,3 +125,25 @@ export function getFileRule(
 
   return null;
 }
+
+/**
+ * First pubkey for which no storage rule accepts a blob of this MIME type.
+ * Pinning a blob for a pubkey puts it under that pubkey's rules, so a token's
+ * p tags are checked here instead of its signer (draft BUD blob pinning).
+ */
+export function findRefusedPubkey(
+  mimeType: string | null,
+  pubkeys: string[],
+  rules: StorageRule[],
+  requirePubkeyInRule: boolean,
+): string | undefined {
+  return pubkeys.find((pubkey) => !getFileRule({ mimeType, pubkey }, rules, requirePubkeyInRule));
+}
+
+/** Whether any storage rule accepts this MIME type, whatever the pubkey. */
+export function acceptsMimeType(
+  mimeType: string | null,
+  rules: StorageRule[],
+): boolean {
+  return rules.some((rule) => mimeMatchesRule(mimeType, rule.type));
+}

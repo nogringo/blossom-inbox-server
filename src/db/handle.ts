@@ -16,7 +16,7 @@ export interface IDbHandle {
   // ── Core blob ops ──────────────────────────────────────────────────────────
   hasBlob(sha256: string): Promise<boolean>;
   getBlob(sha256: string): Promise<BlobRecord | null>;
-  insertBlob(blob: BlobRecord, uploaderPubkey: string): Promise<void>;
+  insertBlob(blob: BlobRecord, pubkeys: string[]): Promise<void>;
   isOwner(sha256: string, pubkey: string): Promise<boolean>;
   getStats(): Promise<BlobStats>;
 

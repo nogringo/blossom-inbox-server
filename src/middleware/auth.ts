@@ -205,11 +205,11 @@ export function authMiddleware(
  * Throws 401 if no valid auth is present, or 403 if the t tag doesn't match.
  *
  * @param ctx   Hono context
- * @param verb  Required BUD-11 verb: "get" | "upload" | "list" | "delete" | "media"
+ * @param verb  Required BUD-11 verb: "get" | "upload" | "list" | "delete" | "media" | "pin"
  */
 export function requireAuth(
   ctx: Context<{ Variables: BlossomVariables }>,
-  verb: "get" | "upload" | "list" | "delete" | "media",
+  verb: "get" | "upload" | "list" | "delete" | "media" | "pin",
 ): NostrEvent {
   const auth = ctx.get("auth");
   if (!auth) {
@@ -236,7 +236,7 @@ export function optionalAuth(
 
 /**
  * Verify that an auth event's x tags include the given hash.
- * Required for upload, delete operations per BUD-11.
+ * Required for upload, delete, and pin operations per BUD-11.
  */
 export function requireXTag(auth: NostrEvent, hash: string): void {
   const matches = auth.tags.some((tag) => tag[0] === "x" && tag[1] === hash);
@@ -245,4 +245,24 @@ export function requireXTag(auth: NostrEvent, hash: string): void {
       message: `Auth token does not authorize operation on blob ${hash}`,
     });
   }
+}
+
+const HEX_PUBKEY_RE = /^[0-9a-f]{64}$/;
+
+/**
+ * Pubkeys named by an upload or pin token's p tags (draft BUD blob pinning).
+ * Empty when the token pins the blob for its signer.
+ */
+export function getPinTargets(auth: NostrEvent): string[] {
+  const targets = new Set<string>();
+  for (const [name, value] of auth.tags) {
+    if (name !== "p") continue;
+    if (!HEX_PUBKEY_RE.test(value ?? "")) {
+      throw new HTTPException(400, {
+        message: "Invalid p tag: expected a 64-character lowercase hex pubkey",
+      });
+    }
+    targets.add(value);
+  }
+  return [...targets];
 }

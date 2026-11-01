@@ -95,7 +95,7 @@ const UploadSchema = z.object({
     .boolean()
     .default(true)
     .describe(
-      "Enable the PUT /upload endpoint (BUD-02). Set to false to make the server read-only.",
+      "Enable the PUT /upload (BUD-02) and PUT /pin endpoints. Set to false to make the server read-only.",
     ),
   requireAuth: z
     .boolean()
@@ -139,7 +139,8 @@ const UploadSchema = z.object({
     .boolean()
     .default(false)
     .describe(
-      "When true, uploads are rejected unless the uploader's pubkey appears in at least one storage rule's pubkeys list. Enables closed/invite-only servers.",
+      "When true, uploads are rejected unless the uploader's pubkey appears in at least one storage rule's pubkeys list. Enables closed/invite-only servers. " +
+        "When the auth token has p tags, each p pubkey must appear instead of the uploader.",
     ),
 });
 

@@ -1,4 +1,4 @@
-import type { Client } from "@libsql/client";
+import type { Client, InStatement } from "@libsql/client";
 import type { Nip94Tag } from "../utils/nip94.ts";
 
 export interface BlobStats {
@@ -62,10 +62,23 @@ export async function hasBlob(db: Client, sha256: string): Promise<boolean> {
   return rs.rows.length > 0;
 }
 
+/** Owner rows are pins. A pubkey that already pins the blob keeps its original pin date. */
+function pinStatements(
+  sha256: string,
+  pubkeys: string[],
+  pinned: number,
+): InStatement[] {
+  return pubkeys.map((pubkey) => ({
+    sql: "INSERT OR IGNORE INTO owners (blob, pubkey, pinned) VALUES (?, ?, ?)",
+    args: [sha256, pubkey, pinned],
+  }));
+}
+
+/** Store a new blob pinned for each pubkey. */
 export async function insertBlob(
   db: Client,
   blob: BlobRecord,
-  uploaderPubkey: string,
+  pubkeys: string[],
 ): Promise<void> {
   await db.batch(
     [
@@ -79,10 +92,7 @@ export async function insertBlob(
           serializeNip94(blob.nip94),
         ],
       },
-      {
-        sql: `INSERT OR IGNORE INTO owners (blob, pubkey) VALUES (?, ?)`,
-        args: [blob.sha256, uploaderPubkey],
-      },
+      ...pinStatements(blob.sha256, pubkeys, blob.uploaded),
       {
         sql: `INSERT OR REPLACE INTO accessed (blob, timestamp) VALUES (?, ?)`,
         args: [blob.sha256, blob.uploaded],
@@ -90,6 +100,45 @@ export async function insertBlob(
     ],
     "write",
   );
+}
+
+/**
+ * Pin a stored blob for each pubkey. Also refreshes its last-access time so
+ * expiry rules cannot prune a blob right after it was pinned.
+ */
+export async function pinBlob(
+  db: Client,
+  sha256: string,
+  pubkeys: string[],
+  pinned: number,
+): Promise<void> {
+  await db.batch(
+    [
+      ...pinStatements(sha256, pubkeys, pinned),
+      {
+        sql: "INSERT OR REPLACE INTO accessed (blob, timestamp) VALUES (?, ?)",
+        args: [sha256, pinned],
+      },
+    ],
+    "write",
+  );
+}
+
+/** Unix timestamp at which a pubkey pinned a blob, or null if it does not pin it. */
+export async function getPinned(
+  db: Client,
+  sha256: string,
+  pubkey: string,
+): Promise<number | null> {
+  const rs = await db.execute({
+    sql: `SELECT COALESCE(o.pinned, b.uploaded)
+          FROM owners o
+          JOIN blobs b ON b.sha256 = o.blob
+          WHERE o.blob = ? AND o.pubkey = ?`,
+    args: [sha256, pubkey],
+  });
+  const row = rs.rows[0];
+  return row ? (row[0] as number) : null;
 }
 
 export async function insertBlobRecord(
