@@ -8,7 +8,7 @@
  *   3. Content-Length > maxSize → 413 (body never read)
  *   4. MIME type allowlist check → 415, refused pin pubkey → 403
  *   5. X-SHA-256 format + auth x-tag validation
- *   6. Dedup check (hasBlob) → pin and fast return if already stored
+ *   6. Dedup check (signer already pins the blob) → pin and fast return
  *   7. Pool worker available? → 503 if pool full (body never read)
  *   8. Generate tmpPath, dispatch stream to worker (zero-copy transfer)
  *   9. Await { hash, size } from worker
@@ -28,7 +28,7 @@ import { Hono } from "@hono/hono";
 import { HTTPException } from "@hono/hono/http-exception";
 import type { Client } from "@libsql/client";
 import { ulid } from "@std/ulid";
-import { getBlob, hasBlob, insertBlob, pinBlob } from "../db/blobs.ts";
+import { getBlob, insertBlob, isOwner, pinBlob } from "../db/blobs.ts";
 import { getPinTargets, requireAuth, requireXTag } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { debug } from "../middleware/debug.ts";
@@ -159,8 +159,8 @@ export function buildUploadRouter(
       return errorResponse(ctx, 503, "Server busy, try again later");
     }
 
-    // If hash provided and blob already exists, signal upload can be skipped
-    if (xSha256 && (await hasBlob(db, xSha256))) {
+    // Only a pubkey that already pins the blob learns it can skip the upload, so this does not reveal whether it exists
+    if (xSha256 && auth && (await isOwner(db, xSha256, auth.pubkey))) {
       return ctx.body(null, 200, { "X-Reason": "Blob already exists (dedup)" });
     }
 
@@ -302,7 +302,8 @@ export function buildUploadRouter(
     // Derive file extension from MIME type — used for on-disk filename and URL
     const ext = mimeToExt(mimeType);
 
-    if (xSha256 && (await hasBlob(db, xSha256))) {
+    // Anyone else goes through the full upload and gets the same response as for a new blob
+    if (xSha256 && auth && (await isOwner(db, xSha256, auth.pubkey))) {
       const existing = await getBlob(db, xSha256);
       if (existing) {
         // Drain rather than cancel while the body remains within maxSize so a

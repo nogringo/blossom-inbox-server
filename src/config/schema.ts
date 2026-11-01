@@ -433,19 +433,7 @@ const ListSchema = z.object({
     .boolean()
     .default(false)
     .describe(
-      "Enable the GET /list/:pubkey endpoint (BUD-02). Disabled by default — the BUD-02 spec marks this endpoint as optional and unrecommended.",
-    ),
-  requireAuth: z
-    .boolean()
-    .default(false)
-    .describe(
-      "Require a valid BUD-11 Nostr auth event to list blobs. When false, anonymous listing is accepted.",
-    ),
-  allowListOthers: z
-    .boolean()
-    .default(true)
-    .describe(
-      "Allow an authenticated user to list blobs belonging to a different pubkey. When false, a user may only list their own blobs.",
+      "Enable the GET /list/:pubkey endpoint (BUD-02). Disabled by default, since the BUD-02 spec marks this endpoint as optional and unrecommended. A pubkey may only list its own blobs, with a list token it signed.",
     ),
 });
 

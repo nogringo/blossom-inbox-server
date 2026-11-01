@@ -8,13 +8,17 @@
  *
  * Range requests: prefer storage.readRange() (native seek/S3 Range header),
  * fall back to stream-slicing when the adapter does not implement readRange().
+ *
+ * Only a get token from a pubkey that pins the blob can read it. Anyone else
+ * gets the same 404 as for a missing blob, so a sender cannot tell when a
+ * recipient deletes what it was sent.
  */
 
 import { Hono } from "@hono/hono";
 import type { Client } from "@libsql/client";
 import type { IBlobStorage } from "../storage/interface.ts";
-import { getBlob, touchBlob } from "../db/blobs.ts";
-import { optionalAuth } from "../middleware/auth.ts";
+import { canReadBlob, getBlob, touchBlob } from "../db/blobs.ts";
+import { requireAuth, requireXScope } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { errorResponse } from "../middleware/errors.ts";
 import type { Config } from "../config/schema.ts";
@@ -61,11 +65,11 @@ export function buildBlobsRouter(
       return next();
     }
 
-    // Optional auth enforcement for private blobs (config-gated, not implemented in v1)
-    // BUD-11: servers MAY require auth for GET — we make it configurable
-    // For now: if requireAuth is set on upload, GET is public (common case)
-    // Future: add config.get.requireAuth
-    const _auth = optionalAuth(ctx);
+    const auth = requireAuth(ctx, "get");
+    requireXScope(auth, hash);
+    if (!(await canReadBlob(db, hash, auth.pubkey))) {
+      return errorResponse(ctx, 404, "Blob not found");
+    }
 
     // Lookup metadata — DB is the index; type column tells us the on-disk extension
     const blob = await getBlob(db, hash);
@@ -88,7 +92,7 @@ export function buildBlobsRouter(
       "Content-Type": mimeType,
       "Content-Length": String(blob.size),
       "Accept-Ranges": "bytes",
-      "Cache-Control": "public, max-age=31536000, immutable",
+      "Cache-Control": "private, max-age=31536000, immutable",
       ETag: `"${hash}"`,
       "Last-Modified": new Date(blob.uploaded * 1000).toUTCString(),
       "X-Content-Type-Options": "nosniff",

@@ -80,6 +80,23 @@ function makeUploadAuth(hash: string, secretKey = sk): NostrEvent {
   );
 }
 
+/** Build a BUD-11 kind 24242 get auth event, encoded for the Authorization header. */
+function getAuthHeader(secretKey = sk): string {
+  const now = Math.floor(Date.now() / 1000);
+  return encodeAuth(finalizeEvent(
+    {
+      kind: 24242,
+      created_at: now,
+      tags: [
+        ["t", "get"],
+        ["expiration", String(now + 600)],
+      ],
+      content: "Get blob",
+    },
+    secretKey,
+  ));
+}
+
 /** Build a valid delete event without the required blob scope. */
 function makeUnscopedDeleteAuth(): NostrEvent {
   const now = Math.floor(Date.now() / 1000);
@@ -232,12 +249,18 @@ Deno.test({
     );
     assertEquals(res.status, 401);
     await res.body?.cancel();
+
+    const missing = await appWithAuth.fetch(
+      new Request(`http://localhost/${"f".repeat(64)}`, { method: "DELETE" }),
+    );
+    assertEquals(missing.status, 401, "a missing blob must not answer differently without auth");
+    await missing.body?.cancel();
   },
   ...testOpts,
 });
 
 Deno.test({
-  name: "DELETE blob: non-owner returns 403",
+  name: "DELETE blob: a non-owner gets the same 404 as for a missing blob",
   async fn() {
     // Upload a blob with sk2 (second key)
     const sk2 = generateSecretKey();
@@ -267,8 +290,22 @@ Deno.test({
         headers: { Authorization: encodeAuth(deleteAuth) },
       }),
     );
-    assertEquals(res.status, 403);
-    await res.body?.cancel();
+    assertEquals(res.status, 404);
+
+    const missingHash = "f".repeat(64);
+    const missing = await appWithAuth.fetch(
+      new Request(`http://localhost/${missingHash}`, {
+        method: "DELETE",
+        headers: { Authorization: encodeAuth(makeDeleteAuth(missingHash, sk)) },
+      }),
+    );
+    assertEquals(res.headers.get("X-Reason"), missing.headers.get("X-Reason"));
+    assertEquals(await res.text(), await missing.text());
+
+    const stillPresent = await appWithAuth.fetch(
+      new Request(`http://localhost/${hash2}`, { method: "HEAD", headers: { Authorization: getAuthHeader(sk2) } }),
+    );
+    assertEquals(stillPresent.status, 200);
   },
   ...testOpts,
 });
@@ -287,7 +324,7 @@ Deno.test({
     await denied.body?.cancel();
 
     const stillPresent = await appWithAuth.fetch(
-      new Request(`http://localhost/${blobHash}`),
+      new Request(`http://localhost/${blobHash}`, { headers: { Authorization: getAuthHeader() } }),
     );
     assertEquals(stillPresent.status, 200);
     await stillPresent.body?.cancel();
@@ -309,7 +346,7 @@ Deno.test({
     await denied.body?.cancel();
 
     const stillPresent = await appWithAuth.fetch(
-      new Request(`http://localhost/${blobHash}`, { method: "HEAD" }),
+      new Request(`http://localhost/${blobHash}`, { method: "HEAD", headers: { Authorization: getAuthHeader() } }),
     );
     assertEquals(stillPresent.status, 200);
     await stillPresent.body?.cancel();

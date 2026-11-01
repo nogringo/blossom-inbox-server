@@ -15,7 +15,9 @@
  */
 
 import { assertEquals, assertNotEquals } from "@std/assert";
+import { encodeBase64Url } from "@std/encoding/base64url";
 import { join } from "@std/path";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { initDb } from "../../src/db/client.ts";
 import { LocalStorage } from "../../src/storage/local.ts";
 import { initPool } from "../../src/workers/pool.ts";
@@ -29,7 +31,17 @@ import type { BlossomVariables } from "../../src/middleware/auth.ts";
 // ---------------------------------------------------------------------------
 
 const testOpts = { sanitizeOps: false, sanitizeResources: false } as const;
+const sk = generateSecretKey();
 let app: Hono<{ Variables: BlossomVariables }>;
+
+function authHeader(verb: "get" | "list"): string {
+  const now = Math.floor(Date.now() / 1000);
+  const event = finalizeEvent(
+    { kind: 24242, created_at: now, tags: [["t", verb], ["expiration", String(now + 600)]], content: "Authorize" },
+    sk,
+  );
+  return `Nostr ${encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))}`;
+}
 let tmpDir: string;
 let cleanup: () => Promise<void>;
 
@@ -54,7 +66,7 @@ Deno.test({
       publicDomain: "localhost",
       upload: { requireAuth: false, enabled: true },
       media: { enabled: true, requireAuth: false, maxSize: 10_000_000 },
-      list: { enabled: true, requireAuth: false, allowListOthers: true },
+      list: { enabled: true },
     });
 
     app = await buildApp(db, storage, config);
@@ -76,7 +88,7 @@ Deno.test({
   name: "X-Reason: GET non-existent blob returns X-Reason header",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost/${"f".repeat(64)}`),
+      new Request(`http://localhost/${"f".repeat(64)}`, { headers: { Authorization: authHeader("get") } }),
     );
     assertEquals(res.status, 404);
     const reason = res.headers.get("X-Reason");
@@ -154,7 +166,7 @@ Deno.test({
   name: "X-Reason: GET /list invalid limit returns X-Reason header",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost/list/${"a".repeat(64)}?limit=-1`),
+      new Request(`http://localhost/list/${getPublicKey(sk)}?limit=-1`, { headers: { Authorization: authHeader("list") } }),
     );
     assertEquals(res.status, 400);
     const reason = res.headers.get("X-Reason");

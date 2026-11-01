@@ -14,10 +14,11 @@ import { encodeBase64Url } from "@std/encoding/base64url";
 import { encodeHex } from "@std/encoding/hex";
 import { crypto as stdCrypto } from "@std/crypto";
 import { join } from "@std/path";
-import { finalizeEvent, generateSecretKey } from "nostr-tools/pure";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { serveStatic } from "@hono/hono/deno";
 import type { NostrEvent } from "nostr-tools";
 import { initDb } from "../../src/db/client.ts";
+import { insertBlob, insertBlobRecord, insertMediaThumbnail } from "../../src/db/blobs.ts";
 import { LocalStorage } from "../../src/storage/local.ts";
 import { initPool } from "../../src/workers/pool.ts";
 import { buildApp } from "../../src/server.ts";
@@ -63,6 +64,25 @@ function makeUploadAuth(hash?: string): NostrEvent {
 
 function encodeAuth(event: NostrEvent): string {
   return `Nostr ${encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))}`;
+}
+
+function makeGetAuth(secretKey = sk, extraTags: string[][] = []): string {
+  const now = Math.floor(Date.now() / 1000);
+  return encodeAuth(finalizeEvent(
+    {
+      kind: 24242,
+      created_at: now,
+      tags: [["t", "get"], ["expiration", String(now + 600)], ...extraTags],
+      content: "Get blob",
+    },
+    secretKey,
+  ));
+}
+
+function blobRequest(path: string, init: RequestInit = {}): Request {
+  const headers = new Headers(init.headers);
+  headers.set("Authorization", makeGetAuth());
+  return new Request(`http://localhost${path}`, { ...init, headers });
 }
 
 // ---------------------------------------------------------------------------
@@ -131,7 +151,7 @@ Deno.test({
 
     config = ConfigSchema.parse({
       publicDomain: "localhost",
-      upload: { requireAuth: false, enabled: true },
+      upload: { enabled: true },
     });
 
     app = await buildApp(db, storage, config);
@@ -327,12 +347,12 @@ Deno.test({
     ];
 
     for (const pathname of acceptedPaths) {
-      const getResponse = await app.fetch(new Request(`http://localhost${pathname}`));
+      const getResponse = await app.fetch(blobRequest(pathname));
       assertEquals(getResponse.status, 200, pathname);
       assertEquals(getResponse.headers.get("Content-Type"), "application/octet-stream", pathname);
       assertEquals(new Uint8Array(await getResponse.arrayBuffer()), BLOB_DATA, pathname);
 
-      const headResponse = await app.fetch(new Request(`http://localhost${pathname}`, { method: "HEAD" }));
+      const headResponse = await app.fetch(blobRequest(pathname, { method: "HEAD" }));
       assertEquals(headResponse.status, 200, pathname);
       assertEquals(headResponse.headers.get("Content-Type"), "application/octet-stream", pathname);
     }
@@ -375,7 +395,7 @@ Deno.test({
 Deno.test({
   name: "GET blob: no Range header returns 200 with full content",
   async fn() {
-    const res = await app.fetch(new Request(`http://localhost${blobUrl}`));
+    const res = await app.fetch(blobRequest(blobUrl));
     assertEquals(res.status, 200);
     assertEquals(res.headers.get("Accept-Ranges"), "bytes");
     assertEquals(res.headers.get("Content-Length"), String(BLOB_SIZE));
@@ -394,7 +414,7 @@ Deno.test({
   name: "HEAD blob: returns 200 with Accept-Ranges regardless of Range header",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         method: "HEAD",
         headers: { Range: "bytes=0-9" },
       }),
@@ -414,7 +434,7 @@ Deno.test({
   name: "GET blob: Range bytes=0-3 returns 206 with first 4 bytes",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=0-3" },
       }),
     );
@@ -432,7 +452,7 @@ Deno.test({
   name: "GET blob: Range bytes=16-19 returns 206 with last 4 bytes",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=16-19" },
       }),
     );
@@ -450,7 +470,7 @@ Deno.test({
   name: "GET blob: Range bytes=0-0 returns 206 with single byte",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=0-0" },
       }),
     );
@@ -468,7 +488,7 @@ Deno.test({
   name: "GET blob: suffix range bytes=-5 returns 206 with last 5 bytes",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=-5" },
       }),
     );
@@ -486,7 +506,7 @@ Deno.test({
   name: "GET blob: open-end range bytes=10- returns 206 from byte 10 to end",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=10-" },
       }),
     );
@@ -504,7 +524,7 @@ Deno.test({
   name: "GET blob: mid-file range bytes=5-14 returns 206 with correct slice",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=5-14" },
       }),
     );
@@ -522,7 +542,7 @@ Deno.test({
   name: "GET blob: range ending past EOF is clamped to the last byte",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: `bytes=0-${BLOB_SIZE}` },
       }),
     );
@@ -545,7 +565,7 @@ Deno.test({
     // The shape nginx's slice module produces for a final slice: the start is
     // inside the blob, the end runs past it.
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: `bytes=16-${BLOB_SIZE + 500}` },
       }),
     );
@@ -570,7 +590,7 @@ Deno.test({
   name: "GET blob: start > end returns 416",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=10-5" },
       }),
     );
@@ -585,7 +605,7 @@ Deno.test({
   name: "GET blob: start >= size returns 416",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: `bytes=${BLOB_SIZE}-${BLOB_SIZE + 10}` },
       }),
     );
@@ -599,7 +619,7 @@ Deno.test({
   name: "GET blob: malformed Range header returns 416",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=foobar" },
       }),
     );
@@ -613,7 +633,7 @@ Deno.test({
   name: "GET blob: multi-range returns 416 (not supported)",
   async fn() {
     const res = await app.fetch(
-      new Request(`http://localhost${blobUrl}`, {
+      blobRequest(blobUrl, {
         headers: { Range: "bytes=0-4, 10-14" },
       }),
     );
@@ -631,7 +651,7 @@ Deno.test({
   name: "GET blob: non-existent hash returns 404",
   async fn() {
     const fakeHash = "f".repeat(64);
-    const res = await app.fetch(new Request(`http://localhost/${fakeHash}`));
+    const res = await app.fetch(blobRequest(`/${fakeHash}`));
     assertEquals(res.status, 404);
     await res.body?.cancel();
   },
@@ -642,10 +662,123 @@ Deno.test({
   name: "HEAD blob: non-existent hash returns 404",
   async fn() {
     const fakeHash = "f".repeat(64);
-    const res = await app.fetch(
-      new Request(`http://localhost/${fakeHash}`, { method: "HEAD" }),
-    );
+    const res = await app.fetch(blobRequest(`/${fakeHash}`, { method: "HEAD" }));
     assertEquals(res.status, 404);
+    await res.body?.cancel();
+  },
+  ...testOpts,
+});
+
+// ---------------------------------------------------------------------------
+// Auth: only a pubkey that pins the blob can read it
+// ---------------------------------------------------------------------------
+
+Deno.test({
+  name: "GET and HEAD blob: no token returns 401 whether the blob exists or not",
+  async fn() {
+    for (const path of [blobUrl, `/${"f".repeat(64)}`]) {
+      for (const method of ["GET", "HEAD"]) {
+        const res = await app.fetch(new Request(`http://localhost${path}`, { method }));
+        assertEquals(res.status, 401, `${method} ${path}`);
+        await res.body?.cancel();
+      }
+    }
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "GET and HEAD blob: a non-pinner gets the same 404 as for a missing blob",
+  async fn() {
+    const stranger = generateSecretKey();
+    for (const method of ["GET", "HEAD"]) {
+      const stored = await app.fetch(
+        new Request(`http://localhost${blobUrl}`, { method, headers: { Authorization: makeGetAuth(stranger) } }),
+      );
+      const missing = await app.fetch(
+        new Request(`http://localhost/${"f".repeat(64)}`, { method, headers: { Authorization: makeGetAuth(stranger) } }),
+      );
+      assertEquals(stored.status, 404, method);
+      assertEquals(stored.headers.get("X-Reason"), missing.headers.get("X-Reason"), method);
+      assertEquals(await stored.text(), await missing.text(), method);
+    }
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "GET blob: x tags limit a get token to their hashes",
+  async fn() {
+    const scoped = await app.fetch(
+      new Request(`http://localhost${blobUrl}`, { headers: { Authorization: makeGetAuth(sk, [["x", blobHash]]) } }),
+    );
+    assertEquals(scoped.status, 200);
+    await scoped.body?.cancel();
+
+    const otherScope = await app.fetch(
+      new Request(`http://localhost${blobUrl}`, { headers: { Authorization: makeGetAuth(sk, [["x", "f".repeat(64)]]) } }),
+    );
+    assertEquals(otherScope.status, 403);
+    await otherScope.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "GET blob: a media thumbnail is readable by the pinners of its parent",
+  async fn() {
+    const thumbnail = new TextEncoder().encode("thumbnail bytes");
+    const thumbnailHash = await sha256Hex(thumbnail);
+    const parentHash = "c".repeat(64);
+    const session = await storage.beginWrite(thumbnail.byteLength);
+    const writer = session.writable.getWriter();
+    await writer.write(thumbnail);
+    await writer.close();
+    await storage.commitWrite(session, thumbnailHash, "");
+    await insertBlob(db, { sha256: parentHash, size: 1, type: null, uploaded: 1000, nip94: null }, [getPublicKey(sk)]);
+    await insertBlobRecord(db, { sha256: thumbnailHash, size: thumbnail.byteLength, type: null, uploaded: 1000, nip94: null });
+    await insertMediaThumbnail(db, parentHash, thumbnailHash);
+
+    const pinner = await app.fetch(blobRequest(`/${thumbnailHash}`));
+    assertEquals(pinner.status, 200);
+    assertEquals(new Uint8Array(await pinner.arrayBuffer()), thumbnail);
+
+    const stranger = await app.fetch(
+      new Request(`http://localhost/${thumbnailHash}`, { headers: { Authorization: makeGetAuth(generateSecretKey()) } }),
+    );
+    assertEquals(stranger.status, 404);
+    await stranger.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "admin dashboard previews blobs through its Basic Auth route",
+  async fn() {
+    const adminApp = await buildApp(
+      db,
+      storage,
+      ConfigSchema.parse({ publicDomain: "localhost", dashboard: { enabled: true, username: "admin", password: "secret" } }),
+    );
+    const contentPath = `http://localhost/admin/blobs/${blobHash}/content`;
+
+    const anonymous = await adminApp.fetch(new Request(contentPath));
+    assertEquals(anonymous.status, 401);
+    await anonymous.body?.cancel();
+
+    const admin = await adminApp.fetch(new Request(contentPath, { headers: { Authorization: `Basic ${btoa("admin:secret")}` } }));
+    assertEquals(admin.status, 200);
+    assertEquals(admin.headers.get("Cache-Control"), "no-store");
+    assertEquals(new Uint8Array(await admin.arrayBuffer()), BLOB_DATA);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "GET blob: responses may only be cached privately",
+  async fn() {
+    const res = await app.fetch(blobRequest(blobUrl));
+    assertEquals(res.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
     await res.body?.cancel();
   },
   ...testOpts,

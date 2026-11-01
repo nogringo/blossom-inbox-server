@@ -2,10 +2,22 @@
 
 ## Unreleased
 
+### Major Changes
+
+- Require a `get` token on `GET` and `HEAD /<sha256>`, and only serve a blob to a pubkey that pins it, or pins the media blob it is the thumbnail of. Anyone
+  else gets the same `404` as for a missing blob, so a sender cannot tell whether or when a recipient deleted what it sent. Blob responses are now
+  `Cache-Control: private`, and clients that fetch blob URLs without a token stop working.
+- Answer `404` to a pubkey that does not pin the blob on `DELETE /<sha256>`, instead of `403`, and check the token before looking the blob up.
+- Only take the dedup shortcut of `HEAD /upload`, `PUT /upload`, `PUT /mirror`, and `PUT /media` for a signer that already pins the blob. Anyone else sends the
+  whole blob and gets the response of a new upload, including its `201` status and a fresh `uploaded` time.
+- Restrict `GET /list/<pubkey>` to a `list` token signed by that pubkey, and remove the `list.requireAuth` and `list.allowListOthers` options.
+- Preview blobs in the admin dashboard through `/admin/blobs/<sha256>/content`, behind its Basic Auth.
+
 ### Minor Changes
 
 - Implement the draft blob pinning BUD. `p` tags in the `upload` token of `PUT /upload`, `HEAD /upload`, and `PUT /mirror` pin the blob for those pubkeys
-  instead of the signer, `PUT /pin/<sha256>` pins an already stored blob, `GET /pin/<sha256>` returns the signer's own pin, and `DELETE /<sha256>` removes it.
+  instead of the signer, `PUT /pin/<sha256>` lets a pubkey that pins a blob pin it again or for its `p` pubkeys, `GET /pin/<sha256>` returns the signer's own
+  pin, and `DELETE /<sha256>` removes it.
 - Check storage rules and `upload.requirePubkeyInRule` against the `p` pubkeys when a token names some, and refuse a `p` pubkey the rules do not accept with
   `403 Forbidden`. A server with `requirePubkeyInRule` enabled now accepts blobs pinned for its listed pubkeys from any signer, including one-time keys.
 - Record when each owner pinned a blob. Owners recorded before this release report the blob's upload time as their pin date.

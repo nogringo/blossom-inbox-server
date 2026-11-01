@@ -247,6 +247,16 @@ export function requireXTag(auth: NostrEvent, hash: string): void {
   }
 }
 
+/** BUD-11: x tags are optional on a get token, but when present they limit it to those hashes. */
+export function requireXScope(auth: NostrEvent, hash: string): void {
+  const xTags = auth.tags.filter((tag) => tag[0] === "x");
+  if (xTags.length > 0 && !xTags.some((tag) => tag[1] === hash)) {
+    throw new HTTPException(403, {
+      message: `Auth token does not authorize operation on blob ${hash}`,
+    });
+  }
+}
+
 const HEX_PUBKEY_RE = /^[0-9a-f]{64}$/;
 
 /**

@@ -9,11 +9,11 @@ import {
   getBlob,
   getMediaDerivative,
   getMediaThumbnail,
-  hasBlob,
   insertBlob,
   insertBlobRecord,
   insertMediaDerivative,
   insertMediaThumbnail,
+  isOwner,
   pinBlob,
 } from "../db/blobs.ts";
 import { requireAuth } from "../middleware/auth.ts";
@@ -494,8 +494,11 @@ export function buildMediaRouter(
         }
       }
 
+      // Dedup shortcuts only serve a signer that already pins the optimized blob.
+      // Anyone else optimizes and stores it like a new one and gets the same
+      // response, so this does not reveal whether it already exists.
       const existingOptimizedHash = await getMediaDerivative(db, originalHash);
-      if (existingOptimizedHash) {
+      if (existingOptimizedHash && auth && (await isOwner(db, existingOptimizedHash, auth.pubkey))) {
         debug(
           debugPrefix,
           `dedup hit (derivative) — optimizedHash=${existingOptimizedHash.slice(0, 8)}`,
@@ -587,7 +590,7 @@ export function buildMediaRouter(
       const optimizedMime = detectOptimizedMime(optPath);
       const optimizedExt = mimeToExt(optimizedMime);
 
-      if (await hasBlob(db, optimizedHash)) {
+      if (auth && (await isOwner(db, optimizedHash, auth.pubkey))) {
         debug(
           debugPrefix,
           `dedup hit (optimized blob) — ${optimizedHash.slice(0, 8)}`,

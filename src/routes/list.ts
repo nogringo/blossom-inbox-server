@@ -8,15 +8,15 @@
  *   - Returns a JSON array of BlobDescriptors sorted by uploaded date DESC
  *   - Supports cursor-based pagination via `cursor` (sha256) and `limit` query params
  *   - Supports optional `since` / `until` Unix timestamp filters
- *   - MAY require BUD-11 auth (controlled by list.requireAuth)
- *   - MAY restrict listing to own pubkey only (controlled by list.allowListOthers)
+ *   - Requires a BUD-11 list token signed by the listed pubkey: a list shows what
+ *     a pubkey received and when it deleted it, so nobody else may read it
  */
 
 import { Hono } from "@hono/hono";
 import { HTTPException } from "@hono/hono/http-exception";
 import type { Client } from "@libsql/client";
 import { getMediaThumbnail, listBlobsByPubkey } from "../db/blobs.ts";
-import { optionalAuth, requireAuth } from "../middleware/auth.ts";
+import { requireAuth } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { errorResponse } from "../middleware/errors.ts";
 import type { Config } from "../config/schema.ts";
@@ -52,18 +52,14 @@ export function buildListRouter(
       );
     }
 
-    let auth: ReturnType<typeof optionalAuth>;
-    if (config.list.requireAuth) {
-      try {
-        auth = requireAuth(ctx, "list");
-      } catch (err) {
-        if (err instanceof HTTPException) {
-          return errorResponse(ctx, err.status as 401 | 403, err.message);
-        }
-        throw err;
+    let auth: ReturnType<typeof requireAuth>;
+    try {
+      auth = requireAuth(ctx, "list");
+    } catch (err) {
+      if (err instanceof HTTPException) {
+        return errorResponse(ctx, err.status as 401 | 403, err.message);
       }
-    } else {
-      auth = optionalAuth(ctx);
+      throw err;
     }
 
     const pubkey = ctx.req.param("pubkey").toLowerCase();
@@ -75,13 +71,8 @@ export function buildListRouter(
       );
     }
 
-    if (!config.list.allowListOthers) {
-      if (!auth) {
-        return errorResponse(ctx, 401, "Authorization required to list blobs");
-      }
-      if (auth.pubkey !== pubkey) {
-        return errorResponse(ctx, 403, "You may only list your own blobs");
-      }
+    if (auth.pubkey !== pubkey) {
+      return errorResponse(ctx, 403, "You may only list your own blobs");
     }
 
     const rawLimit = ctx.req.query("limit");

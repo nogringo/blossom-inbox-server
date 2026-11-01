@@ -378,6 +378,24 @@ export async function isOwner(
   return rs.rows.length > 0;
 }
 
+/** Whether a pubkey pins this blob, or pins the media blob it is the thumbnail of. */
+export async function canReadBlob(
+  db: Client,
+  sha256: string,
+  pubkey: string,
+): Promise<boolean> {
+  const rs = await db.execute({
+    sql: `SELECT 1 FROM owners WHERE blob = ? AND pubkey = ?
+          UNION ALL
+          SELECT 1 FROM media_thumbnails mt
+          JOIN owners o ON o.blob = mt.parent_sha256
+          WHERE mt.thumbnail_sha256 = ? AND o.pubkey = ?
+          LIMIT 1`,
+    args: [sha256, pubkey, sha256, pubkey],
+  });
+  return rs.rows.length > 0;
+}
+
 /** Extended BlobRecord that includes last-access timestamp for prune evaluation. */
 export interface BlobPruneRecord extends BlobRecord {
   /** Unix timestamp from the accessed table, or null if the blob has never been accessed. */

@@ -14,6 +14,7 @@ hash. Built with [Deno 2](https://deno.com), [Hono](https://hono.dev), and [LibS
 - **BUD-09** — Blob reports (`PUT /report`) accepting NIP-56 kind:1984 events
 - **BUD-11** — Nostr-signed event authentication (kind 24242)
 - **Blob pinning** (draft BUD): pin blobs for yourself or for other pubkeys with `p` tags, `PUT /pin/:sha256`, and `GET /pin/:sha256`
+- **Private reads**: only a pubkey that pins a blob can read it or learn that it is stored, see [Privacy](#privacy)
 - Zero-copy streaming uploads — no body buffering, SHA-256 computed in a dedicated worker pool
 - Content-addressed deduplication — re-uploading an existing hash skips the write
 - Configurable storage retention rules with MIME-type glob patterns and per-pubkey scoping
@@ -187,9 +188,7 @@ Compose example and NixOS module enable this safeguard automatically; direct sou
 | `mirror.connectTimeout`      | `30000`          | Timeout (ms) to connect to the origin; 0 = no limit                                                                    |
 | `mirror.bodyTimeout`         | `0`              | Timeout (ms) for full body transfer from origin; 0 = no limit                                                          |
 | `delete.requireAuth`         | `true`           | Require Nostr auth for deletes                                                                                         |
-| `list.enabled`               | `false`          | Enable `GET /list/:pubkey` (BUD-02); disabled by default                                                               |
-| `list.requireAuth`           | `false`          | Require Nostr auth for list requests                                                                                   |
-| `list.allowListOthers`       | `true`           | Allow listing blobs belonging to a different pubkey                                                                    |
+| `list.enabled`               | `false`          | Enable `GET /list/:pubkey` (BUD-02), which only lists the signer's own blobs; disabled by default                      |
 | `media.enabled`              | `false`          | Enable `PUT /media` (BUD-05); requires ffmpeg for video                                                                |
 | `media.requirePubkeyInRule`  | `true`           | Reject media uploads unless the uploader's pubkey appears in the matching storage rule                                 |
 | `report.enabled`             | `true`           | Enable `PUT /report` (BUD-09)                                                                                          |
@@ -290,12 +289,12 @@ Example event (before signing):
 
 | Method   | Path             | Auth       | Description                                                                                                                                           |
 | -------- | ---------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GET`    | `/:sha256[.ext]` | Optional   | Download a blob by its SHA-256 hash. Extension is advisory. Supports `Range`, `If-None-Match`.                                                        |
-| `HEAD`   | `/:sha256[.ext]` | Optional   | Same as GET without the body.                                                                                                                         |
+| `GET`    | `/:sha256[.ext]` | Required   | Download a blob by its SHA-256 hash with a `get` token from a pubkey that pins it. Extension is advisory. Supports `Range`, `If-None-Match`.          |
+| `HEAD`   | `/:sha256[.ext]` | Required   | Same as GET without the body.                                                                                                                         |
 | `PUT`    | `/upload`        | Required\* | Upload a blob. `Content-Length` is required. Returns a `BlobDescriptor`.                                                                              |
 | `HEAD`   | `/upload`        | Required\* | Preflight check (BUD-06). Send `X-Content-Length`, `X-Content-Type`, `X-SHA-256` to verify the server will accept the upload before sending the body. |
 | `DELETE` | `/:sha256`       | Required\* | Remove the signer's pin on a blob. The file is removed once no pubkey pins it.                                                                        |
-| `GET`    | `/list/:pubkey`  | Optional\* | List blobs uploaded by a pubkey. Disabled by default (`list.enabled: false`).                                                                         |
+| `GET`    | `/list/:pubkey`  | Required   | List the blobs a pubkey pins, with a `list` token it signed. Disabled by default (`list.enabled: false`).                                             |
 
 ### Mirror Endpoint (BUD-04)
 
@@ -312,15 +311,33 @@ Example event (before signing):
 
 ### Pin Endpoints (draft blob pinning BUD)
 
-| Method | Path           | Auth     | Description                                                                                                            |
-| ------ | -------------- | -------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `PUT`  | `/pin/:sha256` | Required | Pin a stored blob for the signer, or for each `p` pubkey. Returns its `BlobDescriptor`. Existing pins keep their date. |
-| `GET`  | `/pin/:sha256` | Required | Return the signer's own pin as `{ "sha256": "...", "pinned": <unix timestamp> }`, or 404 if it does not pin the blob.  |
+| Method | Path           | Auth     | Description                                                                                                                    |
+| ------ | -------------- | -------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `PUT`  | `/pin/:sha256` | Required | Pin a blob the signer already pins again, or for each `p` pubkey. Returns its `BlobDescriptor`. Existing pins keep their date. |
+| `GET`  | `/pin/:sha256` | Required | Return the signer's own pin as `{ "sha256": "...", "pinned": <unix timestamp> }`, or 404 if it does not pin the blob.          |
 
 Both take a `pin` token with an `x` tag matching the hash. An `upload` token on `PUT /upload`, `HEAD /upload`, or `PUT /mirror` may carry `p` tags too. The blob
 is then pinned for each `p` pubkey and not for the signer, which can be a one-time key. Storage rules and `upload.requirePubkeyInRule` are checked against the
 `p` pubkeys instead of the signer, and a `p` pubkey they refuse gets `403 Forbidden`. A server with `requirePubkeyInRule: true` therefore accepts blobs that
 anyone sends to its listed pubkeys.
+
+`PUT /pin` only works for a signer that already pins the blob, so a recipient can forward a blob it received. Anyone else gets the same `404` as for a missing
+blob.
+
+### Privacy
+
+A pubkey that does not pin a blob cannot read it, and cannot tell whether the server stores it. A sender, for example, cannot learn whether or when the
+recipient deleted what it sent:
+
+- `GET` and `HEAD /:sha256` need a `get` token. A pubkey that does not pin the blob, or the media blob it is the thumbnail of, gets the same `404` as for a
+  missing blob. `x` tags are optional on a `get` token, and limit it to their hashes when present. Responses are `Cache-Control: private`.
+- `DELETE /:sha256` and `PUT /pin/:sha256` answer `404` to a pubkey that does not pin the blob, whether it exists or not.
+- Dedup shortcuts only serve a signer that already pins the blob: the `HEAD /upload` dedup reason, and the early response of `PUT /upload`, `PUT /mirror`, and
+  `PUT /media`. Anyone else sends the whole blob and gets the response of a new upload.
+- `GET /list/:pubkey` only lists the signer's own pins.
+
+Blobs uploaded without a token (`upload.requireAuth: false`) have no pubkey that can read them. With the S3 backend, keep the bucket private: a public bucket
+lets anyone check a hash directly.
 
 ### Report Endpoint (BUD-09)
 

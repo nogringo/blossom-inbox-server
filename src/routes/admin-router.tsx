@@ -8,6 +8,7 @@
  *   GET  /admin                              → redirect to /admin/blobs
  *   GET  /admin/blobs                        → BlobsPage SSR
  *   GET  /admin/blobs/:sha256                → BlobDetailPage SSR
+ *   GET  /admin/blobs/:sha256/content        → raw blob, for previews
  *   GET  /admin/users                        → UsersPage SSR
  *   GET  /admin/users/:pubkey                → UserDetailPage SSR
  *   GET  /admin/rules                        → RulesPage SSR
@@ -24,7 +25,7 @@ import { basicAuth } from "@hono/hono/basic-auth";
 import type { Client } from "@libsql/client";
 import type { IBlobStorage } from "../storage/interface.ts";
 import type { Config } from "../config/schema.ts";
-import { mimeToExt } from "../utils/mime.ts";
+import { isActiveContentMime, mimeToExt } from "../utils/mime.ts";
 import { deleteBlob, getBlob, listBlobsByPubkeyAdmin } from "../db/blobs.ts";
 import { deleteReport, deleteReportsByBlob, getReport } from "../db/reports.ts";
 import { DirectDbHandle } from "../db/direct.ts";
@@ -67,23 +68,30 @@ export function buildAdminRouter(
   app.get("/blobs", (c) => {
     const page = Math.max(1, parseInt(c.req.query("page") ?? "1", 10));
     const q = c.req.query("q") ?? "";
-    const host = c.req.header("host") ?? "localhost";
-    return c.html(
-      <BlobsPage db={dbHandle} config={config} host={host} page={page} q={q} />,
-    );
+    return c.html(<BlobsPage db={dbHandle} page={page} q={q} />);
   });
 
   app.get("/blobs/:sha256", (c) => {
     const sha256 = c.req.param("sha256");
-    const host = c.req.header("host") ?? "localhost";
-    return c.html(
-      <BlobDetailPage
-        db={dbHandle}
-        config={config}
-        host={host}
-        sha256={sha256}
-      />,
-    );
+    return c.html(<BlobDetailPage db={dbHandle} sha256={sha256} />);
+  });
+
+  // Blob URLs need a pinner's get token, so the dashboard previews blobs through its own route
+  app.get("/blobs/:sha256/content", async (c) => {
+    const blob = await getBlob(db, c.req.param("sha256"));
+    const stream = blob ? await storage.read(blob.sha256, mimeToExt(blob.type)) : null;
+    if (!blob || !stream) return c.json({ error: "Blob not found" }, 404);
+
+    const headers: Record<string, string> = {
+      "Content-Type": blob.type ?? "application/octet-stream",
+      "Content-Length": String(blob.size),
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    };
+    if (isActiveContentMime(blob.type)) {
+      headers["Content-Disposition"] = `attachment; filename="${blob.sha256}"`;
+    }
+    return new Response(stream, { headers });
   });
 
   app.get("/users", (c) => {

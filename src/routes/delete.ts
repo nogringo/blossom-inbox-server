@@ -46,12 +46,6 @@ export function buildDeleteRouter(
       return errorResponse(ctx, 400, "Invalid sha256 hash");
     }
 
-    // Look up the blob before auth so we can return 404 early if it doesn't exist
-    const blob = await getBlob(db, hash);
-    if (!blob) {
-      return errorResponse(ctx, 404, "Blob not found");
-    }
-
     // Auth enforcement
     let pubkey: string | null = null;
     if (config.delete.requireAuth) {
@@ -61,10 +55,15 @@ export function buildDeleteRouter(
       // BUD-11: the delete auth event must include the blob hash in an x tag
       requireXTag(auth, hash);
 
-      // Ownership check — only owners may delete their copy of a blob
+      // A non-owner gets the same 404 as for a missing blob, so this does not reveal whether it exists
       if (!(await isOwner(db, hash, pubkey))) {
-        return errorResponse(ctx, 403, "You are not an owner of this blob");
+        return errorResponse(ctx, 404, "Blob not found");
       }
+    }
+
+    const blob = await getBlob(db, hash);
+    if (!blob) {
+      return errorResponse(ctx, 404, "Blob not found");
     }
 
     const ext = mimeToExt(blob.type);

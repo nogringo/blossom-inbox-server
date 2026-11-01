@@ -1,31 +1,14 @@
 import type { FC } from "@hono/hono/jsx";
 import type { IDbHandle } from "../db/handle.ts";
-import type { Config } from "../config/schema.ts";
-import { mimeToExt } from "../utils/mime.ts";
 import { AdminLayout, Badge, DangerButton, formatBytes, formatDate, PageHeader, truncateHash } from "./layout.tsx";
-
-function getBlobUrl(
-  sha256: string,
-  type: string | null,
-  config: Config,
-  host: string,
-): string {
-  const ext = mimeToExt(type);
-  const scheme = config.publicDomain ? "https" : "http";
-  const hostname = config.publicDomain?.replace(/\/$/, "") ?? host;
-  const base = `${scheme}://${hostname}`;
-  return `${base}/${sha256}${ext ? "." + ext : ""}`;
-}
 
 interface BlobDetailPageProps {
   db: IDbHandle;
-  config: Config;
-  host: string;
   sha256: string;
 }
 
 export const BlobDetailPage: FC<BlobDetailPageProps> = async (
-  { db, config, host, sha256 },
+  { db, sha256 },
 ) => {
   const blob = await db.getBlob(sha256);
 
@@ -52,7 +35,7 @@ export const BlobDetailPage: FC<BlobDetailPageProps> = async (
   });
   const owners = blobsWithOwners[0]?.sha256 === sha256 ? blobsWithOwners[0].owners : [];
 
-  const blobUrl = getBlobUrl(blob.sha256, blob.type, config, host);
+  const blobUrl = `/admin/blobs/${blob.sha256}/content`;
   const deleteUrl = `/admin/api/blobs/${blob.sha256}`;
   const mime = blob.type ?? "";
 

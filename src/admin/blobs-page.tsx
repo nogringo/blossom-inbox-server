@@ -1,7 +1,5 @@
 import type { FC } from "@hono/hono/jsx";
 import type { IDbHandle } from "../db/handle.ts";
-import type { Config } from "../config/schema.ts";
-import { mimeToExt } from "../utils/mime.ts";
 import {
   AdminLayout,
   Badge,
@@ -21,19 +19,6 @@ import {
 
 const PAGE_SIZE = 50;
 
-function getBlobUrl(
-  sha256: string,
-  type: string | null,
-  config: Config,
-  host: string,
-): string {
-  const ext = mimeToExt(type);
-  const scheme = config.publicDomain ? "https" : "http";
-  const hostname = config.publicDomain?.replace(/\/$/, "") ?? host;
-  const base = `${scheme}://${hostname}`;
-  return `${base}/${sha256}${ext ? "." + ext : ""}`;
-}
-
 function mimeColor(mime: string | null): string {
   if (!mime) return "gray";
   if (mime.startsWith("image/")) return "purple";
@@ -45,14 +30,12 @@ function mimeColor(mime: string | null): string {
 
 interface BlobsPageProps {
   db: IDbHandle;
-  config: Config;
-  host: string;
   page: number;
   q: string;
 }
 
 export const BlobsPage: FC<BlobsPageProps> = async (
-  { db, config, host, page, q },
+  { db, page, q },
 ) => {
   const offset = (page - 1) * PAGE_SIZE;
   const filter = q ? { q } : undefined;
@@ -122,12 +105,7 @@ export const BlobsPage: FC<BlobsPageProps> = async (
               </Thead>
               <Tbody>
                 {blobs.map((blob) => {
-                  const blobUrl = getBlobUrl(
-                    blob.sha256,
-                    blob.type,
-                    config,
-                    host,
-                  );
+                  const blobUrl = `/admin/blobs/${blob.sha256}/content`;
                   const deleteUrl = `/admin/api/blobs/${blob.sha256}`;
                   return (
                     <tr

@@ -1,10 +1,12 @@
 import { assertEquals } from "@std/assert";
 import { crypto as stdCrypto } from "@std/crypto";
+import { encodeBase64Url } from "@std/encoding/base64url";
 import { encodeHex } from "@std/encoding/hex";
 import { join } from "@std/path";
+import { finalizeEvent, generateSecretKey, getPublicKey } from "nostr-tools/pure";
 import { ConfigSchema } from "../../src/config/schema.ts";
 import { initDb } from "../../src/db/client.ts";
-import { insertBlobRecord } from "../../src/db/blobs.ts";
+import { insertBlob } from "../../src/db/blobs.ts";
 import { buildApp } from "../../src/server.ts";
 import type { IBlobStorage, WriteSession } from "../../src/storage/interface.ts";
 import { LocalStorage } from "../../src/storage/local.ts";
@@ -75,6 +77,17 @@ function assertReadCounts(storage: ReadCountingStorage, readCalls: number, readR
   assertEquals(storage.readRangeCalls, readRangeCalls);
 }
 
+const readerKey = generateSecretKey();
+
+function getAuth(): string {
+  const now = Math.floor(Date.now() / 1000);
+  const event = finalizeEvent(
+    { kind: 24242, created_at: now, tags: [["t", "get"], ["expiration", String(now + 600)]], content: "Get blob" },
+    readerKey,
+  );
+  return `Nostr ${encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))}`;
+}
+
 async function sha256Hex(data: Uint8Array): Promise<string> {
   const digest = await stdCrypto.subtle.digest("SHA-256", data.buffer as ArrayBuffer);
   return encodeHex(new Uint8Array(digest));
@@ -108,13 +121,13 @@ Deno.test("blob responses isolate active content without changing ordinary retri
       await writer.write(fixture.bytes);
       await writer.close();
       await storage.commitWrite(session, fixture.hash, mimeToExt(fixture.type));
-      await insertBlobRecord(db, {
+      await insertBlob(db, {
         sha256: fixture.hash,
         size: fixture.bytes.byteLength,
         type: fixture.type,
         uploaded: 1_700_000_000,
         nip94: null,
-      });
+      }, [getPublicKey(readerKey)]);
     }
 
     const [active, ordinary, unmappedActive, multipartActive] = fixtures;
@@ -123,6 +136,10 @@ Deno.test("blob responses isolate active content without changing ordinary retri
       upload: { enabled: false, requireAuth: false },
     });
     const app = await buildApp(db, storage, config);
+    const fetchBlob = (request: Request) => {
+      request.headers.set("Authorization", getAuth());
+      return app.fetch(request);
+    };
     const activePath = `/${active.hash}.png`;
     const ordinaryPath = `/${ordinary.hash}.html`;
     const activeDisposition = `attachment; filename="${active.hash}.html"`;
@@ -130,7 +147,7 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     const multipartDisposition = `attachment; filename="${multipartActive.hash}"`;
 
     storage.resetReadCounts();
-    const activeGet = await app.fetch(new Request(`http://localhost${activePath}`));
+    const activeGet = await fetchBlob(new Request(`http://localhost${activePath}`));
     assertEquals(activeGet.status, 200);
     assertEquals(activeGet.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(activeGet.headers.get("Content-Disposition"), activeDisposition);
@@ -138,14 +155,14 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(new Uint8Array(await activeGet.arrayBuffer()), active.bytes);
     assertReadCounts(storage, 1, 0);
 
-    const activeHead = await app.fetch(new Request(`http://localhost${activePath}`, { method: "HEAD" }));
+    const activeHead = await fetchBlob(new Request(`http://localhost${activePath}`, { method: "HEAD" }));
     assertEquals(activeHead.status, 200);
     assertEquals(activeHead.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(activeHead.headers.get("Content-Disposition"), activeDisposition);
     assertEquals(await activeHead.text(), "");
 
     storage.resetReadCounts();
-    const activeRange = await app.fetch(
+    const activeRange = await fetchBlob(
       new Request(`http://localhost${activePath}`, { headers: { Range: "bytes=0-3" } }),
     );
     assertEquals(activeRange.status, 206);
@@ -156,20 +173,20 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertReadCounts(storage, 0, 1);
 
     storage.resetReadCounts();
-    const activeNotModified = await app.fetch(
+    const activeNotModified = await fetchBlob(
       new Request(`http://localhost${activePath}`, { headers: { "If-None-Match": `"${active.hash}"` } }),
     );
     assertEquals(activeNotModified.status, 304);
     assertEquals(activeNotModified.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(activeNotModified.headers.get("Content-Disposition"), activeDisposition);
     assertEquals(activeNotModified.headers.get("ETag"), `"${active.hash}"`);
-    assertEquals(activeNotModified.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+    assertEquals(activeNotModified.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
     assertEquals(activeNotModified.headers.get("Last-Modified") !== null, true);
     assertEquals(activeNotModified.headers.has("Content-Length"), false);
     assertEquals(await activeNotModified.text(), "");
     assertReadCounts(storage, 0, 0);
 
-    const ordinaryGet = await app.fetch(new Request(`http://localhost${ordinaryPath}`));
+    const ordinaryGet = await fetchBlob(new Request(`http://localhost${ordinaryPath}`));
     assertEquals(ordinaryGet.status, 200);
     assertEquals(ordinaryGet.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(ordinaryGet.headers.has("Content-Disposition"), false);
@@ -177,13 +194,13 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(ordinaryGet.headers.get("ETag"), `"${ordinary.hash}"`);
     assertEquals(new Uint8Array(await ordinaryGet.arrayBuffer()), ordinary.bytes);
 
-    const ordinaryHead = await app.fetch(new Request(`http://localhost${ordinaryPath}`, { method: "HEAD" }));
+    const ordinaryHead = await fetchBlob(new Request(`http://localhost${ordinaryPath}`, { method: "HEAD" }));
     assertEquals(ordinaryHead.status, 200);
     assertEquals(ordinaryHead.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(ordinaryHead.headers.has("Content-Disposition"), false);
     assertEquals(await ordinaryHead.text(), "");
 
-    const ordinaryRange = await app.fetch(
+    const ordinaryRange = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, { headers: { Range: "bytes=1-3" } }),
     );
     assertEquals(ordinaryRange.status, 206);
@@ -193,35 +210,35 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(new Uint8Array(await ordinaryRange.arrayBuffer()), ordinary.bytes.subarray(1, 4));
 
     storage.resetReadCounts();
-    const ordinaryNotModified = await app.fetch(
+    const ordinaryNotModified = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, { headers: { "If-None-Match": `"${ordinary.hash}"` } }),
     );
     assertEquals(ordinaryNotModified.status, 304);
     assertEquals(ordinaryNotModified.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(ordinaryNotModified.headers.has("Content-Disposition"), false);
     assertEquals(ordinaryNotModified.headers.get("ETag"), `"${ordinary.hash}"`);
-    assertEquals(ordinaryNotModified.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+    assertEquals(ordinaryNotModified.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
     assertEquals(ordinaryNotModified.headers.get("Last-Modified") !== null, true);
     assertEquals(ordinaryNotModified.headers.has("Content-Length"), false);
     assertEquals(await ordinaryNotModified.text(), "");
     assertReadCounts(storage, 0, 0);
 
     storage.resetReadCounts();
-    const ordinaryWeakNotModified = await app.fetch(
+    const ordinaryWeakNotModified = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, { headers: { "If-None-Match": `W/"${ordinary.hash}"` } }),
     );
     assertEquals(ordinaryWeakNotModified.status, 304);
     assertEquals(ordinaryWeakNotModified.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(ordinaryWeakNotModified.headers.has("Content-Disposition"), false);
     assertEquals(ordinaryWeakNotModified.headers.get("ETag"), `"${ordinary.hash}"`);
-    assertEquals(ordinaryWeakNotModified.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+    assertEquals(ordinaryWeakNotModified.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
     assertEquals(ordinaryWeakNotModified.headers.get("Last-Modified") !== null, true);
     assertEquals(ordinaryWeakNotModified.headers.has("Content-Length"), false);
     assertEquals(await ordinaryWeakNotModified.text(), "");
     assertReadCounts(storage, 0, 0);
 
     storage.resetReadCounts();
-    const ordinaryWildcardNotModified = await app.fetch(
+    const ordinaryWildcardNotModified = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, { headers: { "If-None-Match": "  *  " } }),
     );
     assertEquals(ordinaryWildcardNotModified.status, 304);
@@ -230,19 +247,19 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(await ordinaryWildcardNotModified.text(), "");
     assertReadCounts(storage, 0, 0);
 
-    const ordinaryNonMatching = await app.fetch(
+    const ordinaryNonMatching = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, { headers: { "If-None-Match": `"${active.hash}"` } }),
     );
     assertEquals(ordinaryNonMatching.status, 200);
     assertEquals(new Uint8Array(await ordinaryNonMatching.arrayBuffer()), ordinary.bytes);
 
-    const ordinaryInvalidWeakPrefix = await app.fetch(
+    const ordinaryInvalidWeakPrefix = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, { headers: { "If-None-Match": `w/"${ordinary.hash}"` } }),
     );
     assertEquals(ordinaryInvalidWeakPrefix.status, 200);
     assertEquals(new Uint8Array(await ordinaryInvalidWeakPrefix.arrayBuffer()), ordinary.bytes);
 
-    const ordinaryMixedWildcard = await app.fetch(
+    const ordinaryMixedWildcard = await fetchBlob(
       new Request(`http://localhost${ordinaryPath}`, {
         headers: { "If-None-Match": `"${ordinary.hash}", *` },
       }),
@@ -250,7 +267,7 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(ordinaryMixedWildcard.status, 200);
     assertEquals(new Uint8Array(await ordinaryMixedWildcard.arrayBuffer()), ordinary.bytes);
 
-    const unmappedGet = await app.fetch(new Request(`http://localhost/${unmappedActive.hash}.svg`));
+    const unmappedGet = await fetchBlob(new Request(`http://localhost/${unmappedActive.hash}.svg`));
     assertEquals(unmappedGet.status, 200);
     assertEquals(unmappedGet.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(
@@ -259,20 +276,20 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     );
     assertEquals(new Uint8Array(await unmappedGet.arrayBuffer()), unmappedActive.bytes);
 
-    const multipartGet = await app.fetch(new Request(`http://localhost${multipartPath}`));
+    const multipartGet = await fetchBlob(new Request(`http://localhost${multipartPath}`));
     assertEquals(multipartGet.status, 200);
     assertEquals(multipartGet.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(multipartGet.headers.get("Content-Disposition"), multipartDisposition);
     assertEquals(multipartGet.headers.get("Content-Type"), multipartActive.type);
     assertEquals(new Uint8Array(await multipartGet.arrayBuffer()), multipartActive.bytes);
 
-    const multipartHead = await app.fetch(new Request(`http://localhost${multipartPath}`, { method: "HEAD" }));
+    const multipartHead = await fetchBlob(new Request(`http://localhost${multipartPath}`, { method: "HEAD" }));
     assertEquals(multipartHead.status, 200);
     assertEquals(multipartHead.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(multipartHead.headers.get("Content-Disposition"), multipartDisposition);
     assertEquals(await multipartHead.text(), "");
 
-    const multipartRange = await app.fetch(
+    const multipartRange = await fetchBlob(
       new Request(`http://localhost${multipartPath}`, { headers: { Range: "bytes=0-6" } }),
     );
     assertEquals(multipartRange.status, 206);
@@ -282,7 +299,7 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(new Uint8Array(await multipartRange.arrayBuffer()), multipartActive.bytes.subarray(0, 7));
 
     storage.resetReadCounts();
-    const multipartNotModified = await app.fetch(
+    const multipartNotModified = await fetchBlob(
       new Request(`http://localhost${multipartPath}`, {
         headers: { "If-None-Match": `"${multipartActive.hash}"` },
       }),
@@ -291,14 +308,14 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(multipartNotModified.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(multipartNotModified.headers.get("Content-Disposition"), multipartDisposition);
     assertEquals(multipartNotModified.headers.get("ETag"), `"${multipartActive.hash}"`);
-    assertEquals(multipartNotModified.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+    assertEquals(multipartNotModified.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
     assertEquals(multipartNotModified.headers.get("Last-Modified") !== null, true);
     assertEquals(multipartNotModified.headers.has("Content-Length"), false);
     assertEquals(await multipartNotModified.text(), "");
     assertReadCounts(storage, 0, 0);
 
     storage.resetReadCounts();
-    const multipartWeakNotModified = await app.fetch(
+    const multipartWeakNotModified = await fetchBlob(
       new Request(`http://localhost${multipartPath}`, {
         headers: { "If-None-Match": `W/"${multipartActive.hash}"` },
       }),
@@ -307,14 +324,14 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertEquals(multipartWeakNotModified.headers.get("X-Content-Type-Options"), "nosniff");
     assertEquals(multipartWeakNotModified.headers.get("Content-Disposition"), multipartDisposition);
     assertEquals(multipartWeakNotModified.headers.get("ETag"), `"${multipartActive.hash}"`);
-    assertEquals(multipartWeakNotModified.headers.get("Cache-Control"), "public, max-age=31536000, immutable");
+    assertEquals(multipartWeakNotModified.headers.get("Cache-Control"), "private, max-age=31536000, immutable");
     assertEquals(multipartWeakNotModified.headers.get("Last-Modified") !== null, true);
     assertEquals(multipartWeakNotModified.headers.has("Content-Length"), false);
     assertEquals(await multipartWeakNotModified.text(), "");
     assertReadCounts(storage, 0, 0);
 
     storage.resetReadCounts();
-    const multipartWeakHeadNotModified = await app.fetch(
+    const multipartWeakHeadNotModified = await fetchBlob(
       new Request(`http://localhost${multipartPath}`, {
         method: "HEAD",
         headers: { "If-None-Match": `W/"${multipartActive.hash}"` },
@@ -329,7 +346,7 @@ Deno.test("blob responses isolate active content without changing ordinary retri
     assertReadCounts(storage, 0, 0);
 
     storage.resetReadCounts();
-    const multipartListNotModified = await app.fetch(
+    const multipartListNotModified = await fetchBlob(
       new Request(`http://localhost${multipartPath}`, {
         headers: { "If-None-Match": `"${ordinary.hash}", W/"${multipartActive.hash}"` },
       }),

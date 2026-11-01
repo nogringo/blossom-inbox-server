@@ -1,15 +1,19 @@
 /**
  * Draft BUD "blob pinning":
- *   PUT /pin/:sha256: pin a blob the server already stores
+ *   PUT /pin/:sha256: pin a blob the signer already pins, for itself or its p pubkeys
  *   GET /pin/:sha256: read the signer's own pin on a blob
  *
  * A pin is an owner row. A pubkey removes its pin with DELETE /:sha256
  * (BUD-12), which purges the blob once nobody pins it anymore.
+ *
+ * A signer that does not pin the blob gets the same 404 as for a missing one.
+ * Otherwise anyone who knows a hash could learn whether it is stored, and pin
+ * it for itself to read it.
  */
 
 import { Hono } from "@hono/hono";
 import type { Client } from "@libsql/client";
-import { getBlob, getPinned, pinBlob } from "../db/blobs.ts";
+import { getBlob, getPinned, isOwner, pinBlob } from "../db/blobs.ts";
 import { getPinTargets, requireAuth, requireXTag } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { errorResponse } from "../middleware/errors.ts";
@@ -52,6 +56,9 @@ export function buildPinRouter(
     const pinTargets = getPinTargets(auth);
     const pinners = pinTargets.length > 0 ? pinTargets : [auth.pubkey];
 
+    if (!(await isOwner(db, sha256, auth.pubkey))) {
+      return errorResponse(ctx, 404, "Blob not found");
+    }
     const blob = await getBlob(db, sha256);
     if (!blob) {
       return errorResponse(ctx, 404, "Blob not found");

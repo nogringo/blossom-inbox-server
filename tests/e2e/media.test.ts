@@ -195,6 +195,38 @@ Deno.test({
   ...testOpts,
 });
 
+Deno.test({
+  name: "PUT /media: a non-pinner sending a stored image gets the response of a new upload",
+  async fn() {
+    const png = new Uint8Array(
+      await sharp({
+        create: { width: 2, height: 1, channels: 4, background: { r: 0, g: 0, b: 255, alpha: 1 } },
+      }).png().toBuffer(),
+    );
+    const put = () =>
+      app.fetch(
+        new Request("http://localhost/media", {
+          method: "PUT",
+          headers: { "Content-Length": String(png.byteLength), "Content-Type": "image/png" },
+          body: png,
+        }),
+      );
+
+    const first = await put();
+    assertEquals(first.status, 201);
+    const stored = await first.json() as { sha256: string };
+    await db.execute({ sql: "UPDATE blobs SET uploaded = 1000 WHERE sha256 = ?", args: [stored.sha256] });
+
+    const before = Math.floor(Date.now() / 1000);
+    const second = await put();
+    assertEquals(second.status, 201);
+    const descriptor = await second.json() as { sha256: string; uploaded: number };
+    assertEquals(descriptor.sha256, stored.sha256);
+    assertEquals(descriptor.uploaded >= before, true, "uploaded must not reveal the stored blob's upload time");
+  },
+  ...testOpts,
+});
+
 // ---------------------------------------------------------------------------
 // PUT /media — hash mismatch (409)
 // ---------------------------------------------------------------------------

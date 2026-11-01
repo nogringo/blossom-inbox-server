@@ -67,6 +67,23 @@ function encodeAuth(event: NostrEvent): string {
   return `Nostr ${encodeBase64Url(new TextEncoder().encode(JSON.stringify(event)))}`;
 }
 
+function listAuthHeader(secretKey = sk): string {
+  const now = Math.floor(Date.now() / 1000);
+  return encodeAuth(finalizeEvent(
+    {
+      kind: 24242,
+      created_at: now,
+      tags: [["t", "list"], ["expiration", String(now + 600)]],
+      content: "List blobs",
+    },
+    secretKey,
+  ));
+}
+
+function listRequest(path: string, secretKey = sk): Request {
+  return new Request(`http://localhost${path}`, { headers: { Authorization: listAuthHeader(secretKey) } });
+}
+
 function findNip94Tag(
   descriptor: { nip94?: string[][] },
   name: string,
@@ -104,7 +121,7 @@ Deno.test({
     const config = ConfigSchema.parse({
       publicDomain: "localhost",
       upload: { requireAuth: true, enabled: true },
-      list: { enabled: true, requireAuth: false, allowListOthers: true },
+      list: { enabled: true },
     });
 
     app = await buildApp(db, storage, config);
@@ -144,7 +161,7 @@ Deno.test({
 Deno.test({
   name: "GET /list/:pubkey: returns 200 with blob descriptors",
   async fn() {
-    const res = await app.fetch(new Request(`http://localhost/list/${pk}`));
+    const res = await app.fetch(listRequest(`/list/${pk}`));
     assertEquals(res.status, 200);
 
     const descriptors = await res.json();
@@ -165,17 +182,39 @@ Deno.test({
 });
 
 Deno.test({
-  name: "GET /list/:pubkey: returns 200 with empty array for unknown pubkey",
+  name: "GET /list/:pubkey: returns 200 with empty array for a pubkey that pins nothing",
   async fn() {
-    const unknownPubkey = "a".repeat(64);
-    const res = await app.fetch(
-      new Request(`http://localhost/list/${unknownPubkey}`),
-    );
+    const newcomer = generateSecretKey();
+    const res = await app.fetch(listRequest(`/list/${getPublicKey(newcomer)}`, newcomer));
     assertEquals(res.status, 200);
 
     const descriptors = await res.json();
     assertEquals(Array.isArray(descriptors), true);
     assertEquals(descriptors.length, 0);
+  },
+  ...testOpts,
+});
+
+// ---------------------------------------------------------------------------
+// GET /list/:pubkey: only the listed pubkey may read its list
+// ---------------------------------------------------------------------------
+
+Deno.test({
+  name: "GET /list/:pubkey: no token returns 401",
+  async fn() {
+    const res = await app.fetch(new Request(`http://localhost/list/${pk}`));
+    assertEquals(res.status, 401);
+    await res.body?.cancel();
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "GET /list/:pubkey: listing another pubkey returns 403",
+  async fn() {
+    const res = await app.fetch(listRequest(`/list/${pk}`, generateSecretKey()));
+    assertEquals(res.status, 403);
+    await res.body?.cancel();
   },
   ...testOpts,
 });
@@ -187,9 +226,7 @@ Deno.test({
 Deno.test({
   name: "GET /list/:pubkey: invalid limit returns 400",
   async fn() {
-    const res = await app.fetch(
-      new Request(`http://localhost/list/${pk}?limit=-1`),
-    );
+    const res = await app.fetch(listRequest(`/list/${pk}?limit=-1`));
     assertEquals(res.status, 400);
 
     const reason = res.headers.get("X-Reason") ?? "";
@@ -202,9 +239,7 @@ Deno.test({
 Deno.test({
   name: "GET /list/:pubkey: invalid since returns 400",
   async fn() {
-    const res = await app.fetch(
-      new Request(`http://localhost/list/${pk}?since=notanumber`),
-    );
+    const res = await app.fetch(listRequest(`/list/${pk}?since=notanumber`));
     assertEquals(res.status, 400);
 
     const reason = res.headers.get("X-Reason") ?? "";
@@ -217,9 +252,7 @@ Deno.test({
 Deno.test({
   name: "GET /list/:pubkey: invalid until returns 400",
   async fn() {
-    const res = await app.fetch(
-      new Request(`http://localhost/list/${pk}?until=notanumber`),
-    );
+    const res = await app.fetch(listRequest(`/list/${pk}?until=notanumber`));
     assertEquals(res.status, 400);
 
     const reason = res.headers.get("X-Reason") ?? "";
@@ -232,9 +265,7 @@ Deno.test({
 Deno.test({
   name: "GET /list/:pubkey: invalid pubkey format returns 400",
   async fn() {
-    const res = await app.fetch(
-      new Request(`http://localhost/list/not-a-hex-pubkey`),
-    );
+    const res = await app.fetch(listRequest("/list/not-a-hex-pubkey"));
     assertEquals(res.status, 400);
     await res.body?.cancel();
   },

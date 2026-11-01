@@ -21,7 +21,7 @@
  *  13.  BUD-11 x-tag verification (post-hash, strict):
  *         - Auth present + 0 x tags → 403 (x tag is REQUIRED for PUT /mirror)
  *         - Auth present + x tags present but none matches hash → 403
- *  14.  Dedup guard: if blob already exists, skip rename, pin it, return descriptor
+ *  14.  Dedup guard: if the signer already pins the blob, skip rename, pin it, return descriptor
  *  15.  Atomic Deno.rename(tmpPath → <storageDir>/<hash>[.<ext>])
  *  16.  insertBlob() — metadata write
  *  17.  Return BlobDescriptor JSON 200
@@ -38,7 +38,7 @@ import { HTTPException } from "@hono/hono/http-exception";
 import type { Client } from "@libsql/client";
 import { lookup } from "node:dns/promises";
 import { ulid } from "@std/ulid";
-import { getBlob, insertBlob, pinBlob } from "../db/blobs.ts";
+import { getBlob, insertBlob, isOwner, pinBlob } from "../db/blobs.ts";
 import { getPinTargets, requireAuth } from "../middleware/auth.ts";
 import type { BlossomVariables } from "../middleware/auth.ts";
 import { debug } from "../middleware/debug.ts";
@@ -580,10 +580,9 @@ export function buildMirrorRouter(
 
     const ext = mimeToExt(mimeType);
 
-    // Use one lookup for both existence and descriptor data. A separate
-    // hasBlob() check creates a race where the row can disappear after the temp
-    // file is discarded but before getBlob() returns.
-    const existing = await getBlob(db, hash);
+    // Anyone who does not pin the blob yet stores it like a new one and gets the
+    // same response, so mirroring does not reveal whether it already exists.
+    const existing = auth && (await isOwner(db, hash, auth.pubkey)) ? await getBlob(db, hash) : null;
     if (existing) {
       await storage.abortWrite(session).catch(() => {});
       debug(

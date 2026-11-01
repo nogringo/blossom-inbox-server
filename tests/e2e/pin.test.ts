@@ -101,6 +101,10 @@ function getPin(app: App, hash: string, sk: Uint8Array): Promise<Response> {
   });
 }
 
+function getAs(app: App, hash: string, sk: Uint8Array, method = "GET"): Promise<Response> {
+  return send(app, `/${hash}`, { method, headers: { Authorization: authHeader(sk, "get") } });
+}
+
 function deleteAs(app: App, hash: string, sk: Uint8Array): Promise<Response> {
   return send(app, `/${hash}`, {
     method: "DELETE",
@@ -198,7 +202,7 @@ Deno.test({
     await assertPinned(openApp, blob.hash, bobSk, true);
     await assertPinned(openApp, blob.hash, carolSk, true);
     await assertPinned(openApp, blob.hash, oneTimeSk, false);
-    await assertStatus(deleteAs(openApp, blob.hash, oneTimeSk), 403);
+    await assertStatus(deleteAs(openApp, blob.hash, oneTimeSk), 404);
   },
   ...testOpts,
 });
@@ -211,10 +215,46 @@ Deno.test({
 
     await assertStatus(deleteAs(openApp, blob.hash, bobSk), 204);
     await assertPinned(openApp, blob.hash, bobSk, false);
-    await assertStatus(send(openApp, `/${blob.hash}`), 200);
+    await assertStatus(getAs(openApp, blob.hash, bobSk), 404);
+    await assertStatus(getAs(openApp, blob.hash, carolSk), 200);
 
     await assertStatus(deleteAs(openApp, blob.hash, carolSk), 204);
-    await assertStatus(send(openApp, `/${blob.hash}`), 404);
+    await assertStatus(getAs(openApp, blob.hash, carolSk), 404);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "a sender cannot tell whether the recipient deleted the blob",
+  async fn() {
+    const blob = await makeBlob("sender probe");
+    const senderSk = generateSecretKey();
+    await assertStatus(upload(openApp, blob, senderSk, [bobPk]), 201);
+
+    const probe = async () => {
+      const responses = [
+        await getAs(openApp, blob.hash, senderSk),
+        await getAs(openApp, blob.hash, senderSk, "HEAD"),
+        await send(openApp, `/${blob.hash}`, { method: "DELETE" }),
+        await deleteAs(openApp, blob.hash, senderSk),
+        await putPin(openApp, blob.hash, senderSk),
+        await getPin(openApp, blob.hash, senderSk),
+        await send(openApp, "/upload", {
+          method: "HEAD",
+          headers: {
+            "X-Content-Type": "text/plain",
+            "X-Content-Length": String(blob.data.byteLength),
+            "X-SHA-256": blob.hash,
+            Authorization: authHeader(senderSk, "upload", [["x", blob.hash], ["p", bobPk]]),
+          },
+        }),
+      ];
+      return await Promise.all(responses.map(async (res) => [res.status, res.headers.get("X-Reason"), await res.text()]));
+    };
+
+    const beforeDeletion = await probe();
+    await assertStatus(deleteAs(openApp, blob.hash, bobSk), 204);
+    assertEquals(await probe(), beforeDeletion);
   },
   ...testOpts,
 });
@@ -225,21 +265,40 @@ Deno.test({
     for (const value of ["npub1notahexkey", bobPk.toUpperCase(), bobPk.slice(2), ""]) {
       const blob = await makeBlob(`malformed ${value}`);
       await assertStatus(upload(openApp, blob, aliceSk, [value]), 400);
-      await assertStatus(send(openApp, `/${blob.hash}`, { method: "HEAD" }), 404);
+      await assertStatus(getAs(openApp, blob.hash, aliceSk, "HEAD"), 404);
     }
   },
   ...testOpts,
 });
 
 Deno.test({
-  name: "PUT /upload: dedup hit pins the stored blob for the p pubkeys",
+  name: "PUT /upload: a non-pinner sending a stored blob gets the response of a new upload",
   async fn() {
-    const blob = await makeBlob("dedup");
-    await assertStatus(upload(openApp, blob, aliceSk), 201);
-    await assertStatus(upload(openApp, blob, generateSecretKey(), [bobPk]), 200);
+    const stored = await makeBlob("dedup stored");
+    await assertStatus(upload(openApp, stored, aliceSk), 201);
+    await db.execute({ sql: "UPDATE blobs SET uploaded = 1000 WHERE sha256 = ?", args: [stored.hash] });
+    const fresh = await makeBlob("dedup fresh");
 
+    const before = Math.floor(Date.now() / 1000);
+    for (const blob of [stored, fresh]) {
+      const res = await upload(openApp, blob, generateSecretKey(), [bobPk]);
+      assertEquals(res.status, 201);
+      const descriptor = await res.json() as { uploaded: number };
+      assert(descriptor.uploaded >= before, "uploaded must not reveal the stored blob's upload time");
+      await assertPinned(openApp, blob.hash, bobSk, true);
+    }
+    await assertPinned(openApp, stored.hash, aliceSk, true);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /upload: a pinner re-sending a blob takes the dedup shortcut",
+  async fn() {
+    const blob = await makeBlob("dedup pinner");
+    await assertStatus(upload(openApp, blob, aliceSk), 201);
+    await assertStatus(upload(openApp, blob, aliceSk, [bobPk]), 200);
     await assertPinned(openApp, blob.hash, bobSk, true);
-    await assertPinned(openApp, blob.hash, aliceSk, true);
   },
   ...testOpts,
 });
@@ -254,7 +313,7 @@ Deno.test({
     const forCarol = await makeBlob("inbox carol");
     await assertStatus(upload(inboxApp, forCarol, generateSecretKey(), [carolPk]), 403);
     await assertStatus(upload(inboxApp, forCarol, generateSecretKey(), [bobPk, carolPk]), 403);
-    await assertStatus(send(inboxApp, `/${forCarol.hash}`, { method: "HEAD" }), 404);
+    await assertStatus(getAs(inboxApp, forCarol.hash, bobSk, "HEAD"), 404);
 
     const unsupported = await makeBlob("inbox png");
     await assertStatus(upload(inboxApp, unsupported, generateSecretKey(), [bobPk], "image/png"), 415);
@@ -289,34 +348,49 @@ Deno.test({
 });
 
 Deno.test({
-  name: "PUT /pin: pins a stored blob for the signer and returns its descriptor",
+  name: "PUT /pin: a pinner pins its blob again and gets its descriptor",
   async fn() {
     const blob = await makeBlob("pin signer");
     await assertStatus(upload(openApp, blob, aliceSk), 201);
 
-    const res = await putPin(openApp, blob.hash, bobSk);
+    const res = await putPin(openApp, blob.hash, aliceSk);
     assertEquals(res.status, 200);
     const descriptor = await res.json() as Record<string, unknown>;
     assertEquals(descriptor.sha256, blob.hash);
     assertEquals(descriptor.size, blob.data.byteLength);
     assertEquals(descriptor.type, "text/plain");
     assertEquals(descriptor.url, `http://localhost/${blob.hash}.txt`);
-
-    await assertPinned(openApp, blob.hash, bobSk, true);
   },
   ...testOpts,
 });
 
 Deno.test({
-  name: "PUT /pin: p tags pin for the p pubkeys and not for the signer",
+  name: "PUT /pin: a signer that does not pin the blob gets the same 404 as for a missing one",
+  async fn() {
+    const blob = await makeBlob("pin stranger");
+    await assertStatus(upload(openApp, blob, aliceSk), 201);
+
+    const stored = await putPin(openApp, blob.hash, bobSk, [carolPk]);
+    const missing = await putPin(openApp, "f".repeat(64), bobSk, [carolPk]);
+    assertEquals(stored.status, 404);
+    assertEquals(stored.headers.get("X-Reason"), missing.headers.get("X-Reason"));
+    assertEquals(await stored.text(), await missing.text());
+
+    await assertPinned(openApp, blob.hash, bobSk, false);
+    await assertPinned(openApp, blob.hash, carolSk, false);
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /pin: a pinner forwards a blob to the p pubkeys",
   async fn() {
     const blob = await makeBlob("pin recipients");
-    await assertStatus(upload(openApp, blob, aliceSk), 201);
-    const oneTimeSk = generateSecretKey();
+    await assertStatus(upload(openApp, blob, generateSecretKey(), [bobPk]), 201);
 
-    await assertStatus(putPin(openApp, blob.hash, oneTimeSk, [carolPk]), 200);
+    await assertStatus(putPin(openApp, blob.hash, bobSk, [carolPk]), 200);
     await assertPinned(openApp, blob.hash, carolSk, true);
-    await assertPinned(openApp, blob.hash, oneTimeSk, false);
+    await assertStatus(getAs(openApp, blob.hash, carolSk), 200);
   },
   ...testOpts,
 });
@@ -372,8 +446,7 @@ Deno.test({
     const blob = await makeBlob("pin inbox");
     await assertStatus(upload(inboxApp, blob, bobSk), 201);
 
-    await assertStatus(putPin(inboxApp, blob.hash, carolSk), 403);
-    await assertStatus(putPin(inboxApp, blob.hash, generateSecretKey(), [carolPk]), 403);
+    await assertStatus(putPin(inboxApp, blob.hash, bobSk, [carolPk]), 403);
     await assertPinned(inboxApp, blob.hash, carolSk, false);
   },
   ...testOpts,
@@ -432,6 +505,36 @@ Deno.test({
       );
       await assertPinned(openApp, blob.hash, bobSk, true);
       await assertPinned(openApp, blob.hash, oneTimeSk, false);
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+  },
+  ...testOpts,
+});
+
+Deno.test({
+  name: "PUT /mirror: a non-pinner mirroring a stored blob gets the response of a new mirror",
+  async fn() {
+    const blob = await makeBlob("mirror stored");
+    await assertStatus(upload(openApp, blob, aliceSk), 201);
+    await db.execute({ sql: "UPDATE blobs SET uploaded = 1000 WHERE sha256 = ?", args: [blob.hash] });
+    const originalFetch = globalThis.fetch;
+    globalThis.fetch = () => Promise.resolve(new Response(blob.data, { headers: { "Content-Type": "text/plain" } }));
+
+    try {
+      const before = Math.floor(Date.now() / 1000);
+      const res = await send(openApp, "/mirror", {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: authHeader(generateSecretKey(), "upload", [["x", blob.hash], ["p", bobPk]]),
+        },
+        body: JSON.stringify({ url: "https://1.1.1.1/blob" }),
+      });
+      assertEquals(res.status, 200);
+      const descriptor = await res.json() as { uploaded: number };
+      assert(descriptor.uploaded >= before, "uploaded must not reveal the stored blob's upload time");
+      await assertPinned(openApp, blob.hash, bobSk, true);
     } finally {
       globalThis.fetch = originalFetch;
     }

@@ -582,7 +582,7 @@ Deno.test({
     const entriesAfter = (await Array.fromAsync(Deno.readDir(stagingDir))).map((entry) => entry.name).sort();
     assertEquals(entriesAfter, entriesBefore);
 
-    const blob = await fetchWithAuth(`/${hash}`);
+    const blob = await fetchWithAuth(`/${hash}`, { headers: { Authorization: encodeAuth(makeUploadAuth({ tTag: "get" })) } });
     assertEquals(blob.status, 404);
     await blob.body?.cancel();
   },
@@ -833,18 +833,19 @@ Deno.test({
 // ---------------------------------------------------------------------------
 
 Deno.test({
-  name: "PUT /upload: same content uploaded twice returns same descriptor (dedup)",
+  name: "PUT /upload: a pinner uploading the same content twice gets the same descriptor (dedup)",
   async fn() {
     const body = new TextEncoder().encode("deduplicated content abc123");
     const hash = await sha256Hex(body);
 
     const doUpload = async () => {
-      const res = await fetchNoAuth("/upload", {
+      const res = await fetchWithAuth("/upload", {
         method: "PUT",
         headers: {
           "Content-Length": String(body.byteLength),
           "Content-Type": "application/octet-stream",
           "X-SHA-256": hash,
+          Authorization: encodeAuth(makeUploadAuth({ hash })),
         },
         body: body.slice(),
       });
@@ -872,13 +873,14 @@ Deno.test({
     const body = new TextEncoder().encode("drain-on-dedup payload");
     const hash = await sha256Hex(body);
 
-    // Seed the blob so the next upload takes the dedup path.
-    const seed = await fetchNoAuth("/upload", {
+    // Seed the blob so the next upload by the same pinner takes the dedup path.
+    const seed = await fetchWithAuth("/upload", {
       method: "PUT",
       headers: {
         "Content-Length": String(body.byteLength),
         "Content-Type": "application/octet-stream",
         "X-SHA-256": hash,
+        Authorization: encodeAuth(makeUploadAuth({ hash })),
       },
       body: body.slice(),
     });
@@ -904,12 +906,13 @@ Deno.test({
       },
     });
 
-    const res = await fetchNoAuth("/upload", {
+    const res = await fetchWithAuth("/upload", {
       method: "PUT",
       headers: {
         "Content-Length": String(body.byteLength),
         "Content-Type": "application/octet-stream",
         "X-SHA-256": hash,
+        Authorization: encodeAuth(makeUploadAuth({ hash })),
       },
       body: stream,
     });
@@ -931,7 +934,7 @@ Deno.test({
     const smallConfig = ConfigSchema.parse({
       publicDomain: "localhost",
       storage: { rules: [{ type: "*", expiration: "1 month" }] },
-      upload: { requireAuth: false, enabled: true, maxSize: 32 },
+      upload: { enabled: true, maxSize: 32 },
     });
     const smallApp = await buildApp(smallDb, smallStorage, smallConfig);
     const seedBody = new TextEncoder().encode("dedup seed");
@@ -945,6 +948,7 @@ Deno.test({
             "Content-Length": String(seedBody.byteLength),
             "Content-Type": "application/octet-stream",
             "X-SHA-256": hash,
+            Authorization: encodeAuth(makeUploadAuth({ hash })),
           },
           body: seedBody,
         }),
@@ -959,6 +963,7 @@ Deno.test({
             "Content-Length": "32",
             "Content-Type": "application/octet-stream",
             "X-SHA-256": hash,
+            Authorization: encodeAuth(makeUploadAuth({ hash })),
           },
           body: new Uint8Array(33),
         }),
@@ -981,7 +986,7 @@ Deno.test({
     const listConfig = ConfigSchema.parse({
       publicDomain: "cdn.example.com",
       upload: { requireAuth: true, enabled: true },
-      list: { enabled: true, requireAuth: false, allowListOthers: true },
+      list: { enabled: true },
     });
     const listApp = await buildApp(listDb, listStorage, listConfig);
 
@@ -1003,7 +1008,7 @@ Deno.test({
     assertEquals(uploadRes.status, 201);
 
     const listRes = await listApp.fetch(
-      new Request(`https://localhost/list/${pk}`),
+      new Request(`https://localhost/list/${pk}`, { headers: { Authorization: encodeAuth(makeUploadAuth({ tTag: "list" })) } }),
     );
     assertEquals(listRes.status, 200);
 
@@ -1228,35 +1233,42 @@ Deno.test({
 });
 
 Deno.test({
-  name: "HEAD /upload: existing blob with X-SHA-256 returns 200 with dedup reason",
+  name: "HEAD /upload: only a pinner gets the dedup reason for an existing blob",
   async fn() {
     // Upload the blob first
     const body = new TextEncoder().encode("preflight dedup test xyz");
     const hash = await sha256Hex(body);
 
-    const uploadRes = await fetchNoAuth("/upload", {
+    const uploadRes = await fetchWithAuth("/upload", {
       method: "PUT",
       headers: {
         "Content-Length": String(body.byteLength),
         "Content-Type": "application/octet-stream",
         "X-SHA-256": hash,
+        Authorization: encodeAuth(makeUploadAuth({ hash })),
       },
       body,
     });
     assertEquals(uploadRes.status, 201);
 
-    // Now preflight — should get 200 with X-Reason indicating dedup
-    const res = await fetchNoAuth("/upload", {
+    // Now preflight as the pinner: should get 200 with X-Reason indicating dedup
+    const preflightHeaders = {
+      "X-Content-Length": String(body.byteLength),
+      "X-Content-Type": "application/octet-stream",
+      "X-SHA-256": hash,
+    };
+    const res = await fetchWithAuth("/upload", {
       method: "HEAD",
-      headers: {
-        "X-Content-Length": String(body.byteLength),
-        "X-Content-Type": "application/octet-stream",
-        "X-SHA-256": hash,
-      },
+      headers: { ...preflightHeaders, Authorization: encodeAuth(makeUploadAuth({ hash })) },
     });
     assertEquals(res.status, 200);
     const reason = res.headers.get("X-Reason") ?? "";
     assertMatch(reason, /[Dd]edup|already exists/);
+
+    // Anyone else must not learn that the blob is stored
+    const stranger = await fetchNoAuth("/upload", { method: "HEAD", headers: preflightHeaders });
+    assertEquals(stranger.status, 200);
+    assertEquals(stranger.headers.get("X-Reason"), null);
   },
   ...testOpts,
 });
