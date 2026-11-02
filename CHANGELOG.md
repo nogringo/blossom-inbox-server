@@ -21,6 +21,7 @@
 - Check storage rules and `upload.requirePubkeyInRule` against the `p` pubkeys when a token names some, and refuse a `p` pubkey the rules do not accept with
   `403 Forbidden`. A server with `requirePubkeyInRule` enabled now accepts blobs pinned for its listed pubkeys from any signer, including one-time keys.
 - Record when each owner pinned a blob. Owners recorded before this release report the blob's upload time as their pin date.
+- Add the `landing.showStats` option to hide the "Server Stats" section of the landing page.
 
 ### Patch Changes
 
