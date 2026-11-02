@@ -25,6 +25,8 @@
 ### Patch Changes
 
 - Refresh a blob's last-access time when a deduplicated upload, mirror, or media request pins it, instead of resetting it to the original upload time.
+- Fix the `docker-compose.yml` health check, which always marked the container unhealthy because the image has no `wget`. It now probes with Deno and also
+  passes when the landing page is disabled.
 
 ## 6.4.1 - 2026-10-06
 
